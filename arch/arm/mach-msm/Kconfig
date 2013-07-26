@@ -259,6 +259,7 @@ config ARCH_MSM8610
 
 config ARCH_MSM8226
 	bool "MSM8226"
+	select HAS_MACH_MEMUTILS
 	select ARM_GIC
 	select GIC_SECURE
 	select ARCH_MSM_CORTEXMP
@@ -1443,3 +1444,9 @@ config KRAIT_REGULATOR
 	 regulators running in ganged mode inside the PMIC. Enable
 	 this option to support such configurations.
 endif
+
+config HAS_MACH_MEMUTILS
+	default n
+	bool "Motorola MSM memcpy enhancements"
+	help
+	  Faster memcpy performance for Krait.
