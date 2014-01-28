@@ -284,6 +284,9 @@ static int do_recover_data(struct f2fs_sb_info *sbi, struct inode *inode,
 	int err = 0, recovered = 0;
 	int ilock;
 
+	if (recover_xattr_data(inode, page, blkaddr))
+		return 0;
+
 	start = start_bidx_of_node(ofs_of_node(page));
 	if (IS_INODE(page))
 		end = start + ADDRS_PER_INODE;

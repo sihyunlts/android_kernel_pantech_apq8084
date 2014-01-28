@@ -223,7 +223,7 @@ static void update_sit_entry(struct f2fs_sb_info *sbi, block_t blkaddr, int del)
 		get_sec_entry(sbi, segno)->valid_blocks += del;
 }
 
-static void refresh_sit_entry(struct f2fs_sb_info *sbi,
+void refresh_sit_entry(struct f2fs_sb_info *sbi,
 			block_t old_blkaddr, block_t new_blkaddr)
 {
 	update_sit_entry(sbi, new_blkaddr, 1);
