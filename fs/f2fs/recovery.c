@@ -336,7 +336,7 @@ static int do_recover_data(struct f2fs_sb_info *sbi, struct inode *inode,
 		dn.ofs_in_node++;
 	}
 
-	/* write node page in place */
+	/* Recover node metadata before checkpointing. */
 	set_summary(&sum, dn.nid, 0, 0);
 	if (IS_INODE(dn.node_page))
 		sync_inode_page(&dn);
@@ -345,8 +345,6 @@ static int do_recover_data(struct f2fs_sb_info *sbi, struct inode *inode,
 	fill_node_footer(dn.node_page, dn.nid, ni.ino,
 					ofs_of_node(page), false);
 	set_page_dirty(dn.node_page);
-
-	recover_node_page(sbi, dn.node_page, &sum, &ni, blkaddr);
 err:
 	f2fs_put_dnode(&dn);
 	mutex_unlock_op(sbi, ilock);
