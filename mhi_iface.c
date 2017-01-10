@@ -21,6 +21,15 @@
 mhi_pcie_devices mhi_devices;
 void *mhi_ipc_log;
 
+struct timestamp {
+	uint64_t time;
+	uint64_t reg;
+	int cpu;
+};
+atomic_t log_index;
+struct timestamp *timestamps_log;
+#define NUM_ENTRIES (0x1000) //Must be val of power of 2
+
 static const struct pci_device_id mhi_pcie_device_id[] = {
 	{ MHI_PCIE_VENDOR_ID, MHI_PCIE_DEVICE_ID,
 		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
@@ -49,6 +58,19 @@ struct pci_driver mhi_pcie_driver = {
 		.of_match_table = of_match_ptr(mhi_plat_match),
 	},
 };
+
+void timestamp_log(uint64_t reg)
+{
+	int cpu = raw_smp_processor_id();
+	int index;
+	const int entries = NUM_ENTRIES - 1;
+
+	index = atomic_add_return(1, &log_index);
+	index--;
+	(timestamps_log + (index & entries))->time = sched_clock();
+	(timestamps_log + (index & entries))->reg = reg;
+	(timestamps_log + (index & entries))->cpu = cpu;
+}
 
 int mhi_probe(struct pci_dev *pcie_device,
 		const struct pci_device_id *mhi_device_id)
@@ -103,6 +125,8 @@ static void __exit mhi_exit(void)
 
 static int __init mhi_init(void)
 {
+	atomic_set(&log_index, 0);
+	timestamps_log = (struct timestamp*)kmalloc(sizeof(struct timestamp) * NUM_ENTRIES, GFP_KERNEL);
 	if (pci_register_driver(&mhi_pcie_driver))
 		return -EIO;
 	mhi_ipc_log = ipc_log_context_create(MHI_IPC_LOG_PAGES, "mhi");

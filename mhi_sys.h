@@ -80,26 +80,19 @@ extern void *mhi_ipc_log;
 			       "[%s] " _msg, __func__, ##__VA_ARGS__);	\
 } while (0)
 
-#define pcie_read(base, offset)	 readl_relaxed((volatile void *) \
-		(uintptr_t)(base+offset))
-#define pcie_write(base, offset, val) do { \
-	u32 cmp_val;				\
-	u32 i = 5;				\
-	do {							\
-		writel_relaxed(val,			\
-				(volatile void *)(uintptr_t)(base + offset)); \
-		wmb();						\
-		cmp_val = pcie_read(base, offset);		\
-		if (cmp_val != val) {					\
-			mhi_log(MHI_MSG_INFO,			\
-					"PCIe read did not return same value as was written\n"); \
-		} else {			\
-			break;			\
-		}				\
-	} while (--i);				\
-	if (0 == i) 				\
-	mhi_log(MHI_MSG_CRITICAL, "Write never made it to MDM");  \
-} while (0)
+#define pcie_read(base, offset, dest)	do {				\
+	                        dest = readl_relaxed((volatile void *)		\
+					      (uintptr_t)(base+offset)); \
+				timestamp_log(base + offset);		\
+	                        } while (0)
+
+#define pcie_write(base, offset, val) do {				\
+	                        timestamp_log (base + offset);		\
+				writel_relaxed(val,			\
+					(volatile void *)(uintptr_t)(base + offset)); \
+				wmb();					\
+				PULSE_L1_EXIT(0);			\
+				} while (0)
 
 irqreturn_t irq_cb(int msi_number, void *dev_id);
 

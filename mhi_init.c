@@ -19,26 +19,26 @@ MHI_STATUS mhi_clean_init_stage(mhi_device_ctxt *mhi_dev_ctxt,
 {
 	MHI_STATUS ret_val = MHI_STATUS_SUCCESS;
 	switch (cleanup_stage) {
-		case MHI_INIT_ERROR_STAGE_UNWIND_ALL:
-		case MHI_INIT_ERROR_STAGE_DEVICE_CTRL:
-			mhi_freememregion(mhi_dev_ctxt->mhi_ctrl_seg_info);
-		case MHI_INIT_ERROR_STAGE_THREAD_QUEUES:
-		case MHI_INIT_ERROR_STAGE_THREADS:
-			kfree(mhi_dev_ctxt->event_handle);
-			kfree(mhi_dev_ctxt->state_change_event_handle);
-			kfree(mhi_dev_ctxt->M0_event);
-		case MHI_INIT_ERROR_STAGE_EVENTS:
-			kfree(mhi_dev_ctxt->mhi_ctrl_seg_info);
-		case MHI_INIT_ERROR_STAGE_MEM_ZONES:
-			kfree(mhi_dev_ctxt->mhi_cmd_mutex_list);
-			kfree(mhi_dev_ctxt->mhi_chan_mutex);
-			kfree(mhi_dev_ctxt->mhi_ev_spinlock_list);
-		case MHI_INIT_ERROR_STAGE_SYNC:
-			kfree(mhi_dev_ctxt);
-			break;
-		default:
-			ret_val = MHI_STATUS_ERROR;
-			break;
+	case MHI_INIT_ERROR_STAGE_UNWIND_ALL:
+	case MHI_INIT_ERROR_STAGE_DEVICE_CTRL:
+		mhi_freememregion(mhi_dev_ctxt->mhi_ctrl_seg_info);
+	case MHI_INIT_ERROR_STAGE_THREAD_QUEUES:
+	case MHI_INIT_ERROR_STAGE_THREADS:
+		kfree(mhi_dev_ctxt->event_handle);
+		kfree(mhi_dev_ctxt->state_change_event_handle);
+		kfree(mhi_dev_ctxt->M0_event);
+	case MHI_INIT_ERROR_STAGE_EVENTS:
+		kfree(mhi_dev_ctxt->mhi_ctrl_seg_info);
+	case MHI_INIT_ERROR_STAGE_MEM_ZONES:
+		kfree(mhi_dev_ctxt->mhi_cmd_mutex_list);
+		kfree(mhi_dev_ctxt->mhi_chan_mutex);
+		kfree(mhi_dev_ctxt->mhi_ev_spinlock_list);
+	case MHI_INIT_ERROR_STAGE_SYNC:
+		kfree(mhi_dev_ctxt);
+		break;
+	default:
+		ret_val = MHI_STATUS_ERROR;
+		break;
 	}
 	return ret_val;
 }
@@ -73,7 +73,7 @@ MHI_STATUS mhi_init_device_ctxt(mhi_pcie_dev_info *dev_info,
 	if (MHI_STATUS_SUCCESS != mhi_init_ctrl_zone(dev_info, *mhi_device)) {
 		mhi_log(MHI_MSG_ERROR, "Failed to initialize  memory zones\n");
 		mhi_clean_init_stage(*mhi_device,
-				MHI_INIT_ERROR_STAGE_MEM_ZONES);
+					MHI_INIT_ERROR_STAGE_MEM_ZONES);
 		return MHI_STATUS_ERROR;
 	}
 	if (MHI_STATUS_SUCCESS != mhi_init_events(*mhi_device)) {
@@ -84,19 +84,19 @@ MHI_STATUS mhi_init_device_ctxt(mhi_pcie_dev_info *dev_info,
 	if (MHI_STATUS_SUCCESS != mhi_reset_all_thread_queues(*mhi_device)) {
 		mhi_log(MHI_MSG_ERROR, "Failed to initialize work queues\n");
 		mhi_clean_init_stage(*mhi_device,
-				MHI_INIT_ERROR_STAGE_THREAD_QUEUES);
+					MHI_INIT_ERROR_STAGE_THREAD_QUEUES);
 		return MHI_STATUS_ERROR;
 	}
 	if (MHI_STATUS_SUCCESS != mhi_init_device_ctrl(*mhi_device)) {
 		mhi_log(MHI_MSG_ERROR, "Failed to initialize ctrl seg\n");
 		mhi_clean_init_stage(*mhi_device,
-				MHI_INIT_ERROR_STAGE_THREAD_QUEUES);
+					MHI_INIT_ERROR_STAGE_THREAD_QUEUES);
 		return MHI_STATUS_ERROR;
 	}
 	if (MHI_STATUS_SUCCESS != mhi_init_contexts(*mhi_device)) {
 		mhi_log(MHI_MSG_ERROR, "Failed initializing contexts\n");
 		mhi_clean_init_stage(*mhi_device,
-				MHI_INIT_ERROR_STAGE_DEVICE_CTRL);
+					MHI_INIT_ERROR_STAGE_DEVICE_CTRL);
 		return MHI_STATUS_ERROR;
 	}
 	if (MHI_STATUS_SUCCESS != mhi_spawn_threads(*mhi_device)) {
@@ -106,20 +106,20 @@ MHI_STATUS mhi_init_device_ctxt(mhi_pcie_dev_info *dev_info,
 	if (MHI_STATUS_SUCCESS != mhi_init_timers(*mhi_device)) {
 		mhi_log(MHI_MSG_ERROR, "Failed initializing timers\n");
 		mhi_clean_init_stage(*mhi_device,
-				MHI_INIT_ERROR_STAGE_DEVICE_CTRL);
+					MHI_INIT_ERROR_STAGE_DEVICE_CTRL);
 		return MHI_STATUS_ERROR;
 	}
 	if (MHI_STATUS_SUCCESS != mhi_init_wakelock(*mhi_device)) {
 		mhi_log(MHI_MSG_ERROR, "Failed to initialize wakelock\n");
 		mhi_clean_init_stage(*mhi_device,
-				MHI_INIT_ERROR_STAGE_DEVICE_CTRL);
+					MHI_INIT_ERROR_STAGE_DEVICE_CTRL);
 		return MHI_STATUS_ERROR;
 	}
-	if (MHI_STATUS_SUCCESS != mhi_init_work_queues(*mhi_device)) {
-		mhi_log(MHI_MSG_ERROR, "Failed initializing work queues\n");
-		mhi_clean_init_stage(*mhi_device,
-				MHI_INIT_ERROR_STAGE_DEVICE_CTRL);
-		return MHI_STATUS_ERROR;
+		if (MHI_STATUS_SUCCESS != mhi_init_work_queues(*mhi_device)) {
+			mhi_log(MHI_MSG_ERROR, "Failed initializing work queues\n");
+			mhi_clean_init_stage(*mhi_device,
+					MHI_INIT_ERROR_STAGE_DEVICE_CTRL);
+			return MHI_STATUS_ERROR;
 	}
 	(*mhi_device)->dev_info = dev_info;
 	(*mhi_device)->dev_props = &dev_info->core;
@@ -150,11 +150,11 @@ MHI_STATUS mhi_create_ctxt(mhi_device_ctxt **mhi_device)
 
 	(*mhi_device)->alloced_ev_rings[PRIMARY_EVENT_RING] = 0;
 	(*mhi_device)->alloced_ev_rings[SOFTWARE_EV_RING] =
-		SOFTWARE_EV_RING;
+						SOFTWARE_EV_RING;
 	(*mhi_device)->alloced_ev_rings[IPA_OUT_EV_RING] =
-		MHI_CLIENT_IP_HW_0_OUT;
+						MHI_CLIENT_IP_HW_0_OUT;
 	(*mhi_device)->alloced_ev_rings[IPA_IN_EV_RING] =
-		MHI_CLIENT_IP_HW_0_IN;
+						MHI_CLIENT_IP_HW_0_IN;
 	MHI_SET_EVENT_RING_INFO(EVENT_RING_POLLING,
 			(*mhi_device)->ev_ring_props[PRIMARY_EVENT_RING],
 			MHI_EVENT_POLLING_ENABLED);
@@ -188,21 +188,21 @@ MHI_STATUS mhi_init_sync(mhi_device_ctxt *mhi_dev_ctxt)
 	u32 i = 0;
 
 	mhi_dev_ctxt->mhi_ev_spinlock_list = kmalloc(sizeof(spinlock_t) *
-			MHI_MAX_CHANNELS,
-			GFP_KERNEL);
+							MHI_MAX_CHANNELS,
+							GFP_KERNEL);
 	if (NULL == mhi_dev_ctxt->mhi_ev_spinlock_list)
 		goto ev_mutex_free;
 	mhi_dev_ctxt->mhi_chan_mutex = kmalloc(sizeof(struct mutex) *
-			MHI_MAX_CHANNELS, GFP_KERNEL);
+						MHI_MAX_CHANNELS, GFP_KERNEL);
 	if (NULL == mhi_dev_ctxt->mhi_chan_mutex)
 		goto chan_mutex_free;
 	mhi_dev_ctxt->mhi_cmd_mutex_list = kmalloc(sizeof(struct mutex) *
-			NR_OF_CMD_RINGS, GFP_KERNEL);
+						NR_OF_CMD_RINGS, GFP_KERNEL);
 	if (NULL == mhi_dev_ctxt->mhi_cmd_mutex_list)
 		goto cmd_mutex_free;
 
 	mhi_dev_ctxt->db_write_lock = kmalloc(sizeof(spinlock_t) *
-			MHI_MAX_CHANNELS, GFP_KERNEL);
+						MHI_MAX_CHANNELS, GFP_KERNEL);
 	if (NULL == mhi_dev_ctxt->db_write_lock)
 		goto db_write_lock_free;
 	for (i = 0; i < mhi_dev_ctxt->nr_of_cc; ++i)
@@ -238,10 +238,10 @@ ev_mutex_free:
  * @return MHI_STATUS
  */
 MHI_STATUS mhi_init_ctrl_zone(mhi_pcie_dev_info *dev_info,
-		mhi_device_ctxt *mhi_dev_ctxt)
+				mhi_device_ctxt *mhi_dev_ctxt)
 {
 	mhi_dev_ctxt->mhi_ctrl_seg_info = kmalloc(sizeof(mhi_meminfo),
-			GFP_KERNEL);
+							GFP_KERNEL);
 	if (NULL == mhi_dev_ctxt->mhi_ctrl_seg_info)
 		return MHI_STATUS_ALLOC_ERROR;
 	mhi_dev_ctxt->mhi_ctrl_seg_info->dev = &dev_info->pcie_device->dev;
@@ -259,14 +259,14 @@ MHI_STATUS mhi_init_ctrl_zone(mhi_pcie_dev_info *dev_info,
 MHI_STATUS mhi_spawn_threads(mhi_device_ctxt *mhi_dev_ctxt)
 {
 	mhi_dev_ctxt->event_thread_handle = kthread_run(parse_event_thread,
-			mhi_dev_ctxt,
-			"MHI_EV_THREAD");
+							mhi_dev_ctxt,
+							"MHI_EV_THREAD");
 	if (-ENOMEM == (int)mhi_dev_ctxt->event_thread_handle)
 		return MHI_STATUS_ERROR;
 	mhi_dev_ctxt->st_thread_handle = kthread_run(mhi_state_change_thread,
-			mhi_dev_ctxt,
-			"MHI_STATE_THREAD");
-	if (-ENOMEM == (int)mhi_dev_ctxt->event_thread_handle)
+							mhi_dev_ctxt,
+							"MHI_STATE_THREAD");
+	if (-ENOMEM == (int)mhi_dev_ctxt->st_thread_handle)
 		return MHI_STATUS_ERROR;
 	return MHI_STATUS_SUCCESS;
 }
@@ -281,13 +281,13 @@ MHI_STATUS mhi_init_events(mhi_device_ctxt *mhi_dev_ctxt)
 {
 
 	mhi_dev_ctxt->event_handle = kmalloc(sizeof(wait_queue_head_t),
-			GFP_KERNEL);
+						GFP_KERNEL);
 	if (NULL == mhi_dev_ctxt->event_handle) {
 		mhi_log(MHI_MSG_ERROR, "Failed to init event");
 		return MHI_STATUS_ERROR;
 	}
 	mhi_dev_ctxt->state_change_event_handle =
-		kmalloc(sizeof(wait_queue_head_t), GFP_KERNEL);
+				kmalloc(sizeof(wait_queue_head_t), GFP_KERNEL);
 	if (NULL == mhi_dev_ctxt->state_change_event_handle) {
 		mhi_log(MHI_MSG_ERROR, "Failed to init event");
 		goto error_event_handle_alloc;
@@ -369,7 +369,7 @@ MHI_STATUS mhi_init_state_change_thread_work_queue(mhi_state_work_queue *q)
  *	doorbell, to announce to the mhi_dev_ctxt the new available elements
  */
 MHI_STATUS mhi_init_event_ring(mhi_device_ctxt *mhi_dev_ctxt, u32 nr_ev_el,
-		u32 event_ring_index)
+				u32 event_ring_index)
 {
 	mhi_event_pkt *ev_pkt = NULL;
 	u32 i = 0;
@@ -397,7 +397,7 @@ MHI_STATUS mhi_init_event_ring(mhi_device_ctxt *mhi_dev_ctxt, u32 nr_ev_el,
 		ret_val = ctxt_add_element(event_ctxt, (void *)&ev_pkt);
 		if (MHI_STATUS_SUCCESS != ret_val) {
 			mhi_log(MHI_MSG_ERROR,
-					"Failed to insert el in ev ctxt\n");
+				"Failed to insert el in ev ctxt\n");
 			ret_val = MHI_STATUS_ERROR;
 			break;
 		}
@@ -423,11 +423,10 @@ MHI_STATUS mhi_init_device_ctrl(mhi_device_ctxt *mhi_device)
 	u32 align_len = sizeof(u64)*2;
 	MHI_STATUS ret_val = MHI_STATUS_SUCCESS;
 
+	mhi_device->enable_lpm = 1;
 	if (NULL == mhi_device || NULL == mhi_device->mhi_ctrl_seg_info ||
 			NULL == mhi_device->mhi_ctrl_seg_info->dev)
 		return MHI_STATUS_ERROR;
-
-	mhi_device->enable_lpm = 1;
 
 	mhi_log(MHI_MSG_INFO, "Allocating control segment.\n");
 	ctrl_seg_size += sizeof(mhi_control_seg);
@@ -445,22 +444,22 @@ MHI_STATUS mhi_init_device_ctrl(mhi_device_ctxt *mhi_device)
 
 	for (i = 0; i < EVENT_RINGS_ALLOCATED; ++i)
 		ctrl_seg_size += sizeof(mhi_event_pkt)*
-			(EV_EL_PER_RING + ELEMENT_GAP);
+					(EV_EL_PER_RING + ELEMENT_GAP);
 
 	ctrl_seg_size += align_len - (ctrl_seg_size % align_len);
 	ret_val = mhi_mallocmemregion(mhi_device->mhi_ctrl_seg_info,
-			ctrl_seg_size);
+							ctrl_seg_size);
 	if (MHI_STATUS_SUCCESS != ret_val)
 		return MHI_STATUS_ERROR;
 	(mhi_device->mhi_ctrl_seg =
-	 mhi_get_virt_addr(mhi_device->mhi_ctrl_seg_info));
+			mhi_get_virt_addr(mhi_device->mhi_ctrl_seg_info));
 
 	if (0 == mhi_device->mhi_ctrl_seg)
 		return MHI_STATUS_ALLOC_ERROR;
 
 	/* Set the channel contexts, event contexts and cmd context */
 	ctrl_seg_offset = (uintptr_t)mhi_device->mhi_ctrl_seg +
-		sizeof(mhi_control_seg);
+						sizeof(mhi_control_seg);
 	ctrl_seg_offset += align_len - (ctrl_seg_offset % align_len);
 	/* Set the TRB lists */
 	for (i = 0; i < MHI_MAX_CHANNELS; ++i) {
@@ -514,15 +513,15 @@ MHI_STATUS mhi_init_contexts(mhi_device_ctxt *mhi_device)
 
 	for (i = 0; i < EVENT_RINGS_ALLOCATED; ++i) {
 		MHI_GET_EVENT_RING_INFO(EVENT_RING_MSI_VEC,
-				mhi_device->ev_ring_props[i],
-				msi_vec);
+					mhi_device->ev_ring_props[i],
+					msi_vec);
 		switch (i) {
-			case IPA_OUT_EV_RING:
-				intmod_t = 10;
-				break;
-			case IPA_IN_EV_RING:
-				intmod_t = 6;
-				break;
+		case IPA_OUT_EV_RING:
+			intmod_t = 10;
+			break;
+		case IPA_IN_EV_RING:
+			intmod_t = 6;
+			break;
 		}
 		event_ring_index = mhi_device->alloced_ev_rings[i];
 		event_ctxt = &mhi_ctrl->mhi_ec_list[event_ring_index];
@@ -530,10 +529,10 @@ MHI_STATUS mhi_init_contexts(mhi_device_ctxt *mhi_device)
 			&mhi_device->mhi_local_event_ctxt[event_ring_index];
 
 		ev_ring_addr = mhi_v2p_addr(mhi_device->mhi_ctrl_seg_info,
-				(uintptr_t)mhi_ctrl->ev_trb_list[i]);
+					(uintptr_t)mhi_ctrl->ev_trb_list[i]);
 		mhi_log(MHI_MSG_VERBOSE,
-				"Setting msi_vec 0x%x, for ev ring ctxt 0x%x\n",
-				msi_vec, event_ring_index);
+			"Setting msi_vec 0x%x, for ev ring ctxt 0x%x\n",
+			msi_vec, event_ring_index);
 		mhi_event_ring_init(event_ctxt, ev_ring_addr,
 				(uintptr_t)mhi_ctrl->ev_trb_list[i],
 				EV_EL_PER_RING, local_event_ctxt,
@@ -543,7 +542,7 @@ MHI_STATUS mhi_init_contexts(mhi_device_ctxt *mhi_device)
 	/* Init Command Ring */
 	mhi_cmd_ring_init(&mhi_ctrl->mhi_cmd_ctxt_list[PRIMARY_CMD_RING],
 			mhi_v2p_addr(mhi_device->mhi_ctrl_seg_info,
-				(uintptr_t)mhi_ctrl->cmd_trb_list[PRIMARY_CMD_RING]),
+			(uintptr_t)mhi_ctrl->cmd_trb_list[PRIMARY_CMD_RING]),
 			(uintptr_t)mhi_ctrl->cmd_trb_list[PRIMARY_CMD_RING],
 			CMD_EL_PER_RING,
 			&mhi_device->mhi_local_cmd_ctxt[PRIMARY_CMD_RING]);
@@ -555,23 +554,23 @@ MHI_STATUS mhi_init_contexts(mhi_device_ctxt *mhi_device)
 		chan_ctxt = &mhi_device->mhi_ctrl_seg->mhi_cc_list[i];
 		if (IS_SOFTWARE_CHANNEL(i)) {
 			mhi_init_chan_ctxt(chan_ctxt,
-					mhi_v2p_addr(mhi_device->mhi_ctrl_seg_info,
-						(uintptr_t)trb_list),
-					(uintptr_t)trb_list,
-					MAX_NR_TRBS_PER_SOFT_CHAN,
-					(i % 2) ? MHI_IN : MHI_OUT,
-					0,
-					&mhi_device->mhi_local_chan_ctxt[i]);
+				mhi_v2p_addr(mhi_device->mhi_ctrl_seg_info,
+					(uintptr_t)trb_list),
+				(uintptr_t)trb_list,
+				MAX_NR_TRBS_PER_SOFT_CHAN,
+				(i % 2) ? MHI_IN : MHI_OUT,
+				0,
+				&mhi_device->mhi_local_chan_ctxt[i]);
 		} else if (IS_HARDWARE_CHANNEL(i)) {
 
 			mhi_init_chan_ctxt(chan_ctxt,
-					mhi_v2p_addr(mhi_device->mhi_ctrl_seg_info,
-						(uintptr_t)trb_list),
-					(uintptr_t)trb_list,
-					MAX_NR_TRBS_PER_HARD_CHAN,
-					(i % 2) ? MHI_IN : MHI_OUT,
-					i,
-					&mhi_device->mhi_local_chan_ctxt[i]);
+				mhi_v2p_addr(mhi_device->mhi_ctrl_seg_info,
+					(uintptr_t)trb_list),
+				(uintptr_t)trb_list,
+				MAX_NR_TRBS_PER_HARD_CHAN,
+				(i % 2) ? MHI_IN : MHI_OUT,
+				i,
+				&mhi_device->mhi_local_chan_ctxt[i]);
 		}
 	}
 	mhi_device->mhi_state = MHI_STATE_RESET;
@@ -658,9 +657,9 @@ MHI_STATUS mhi_event_ring_init(mhi_event_ctxt *ev_list,
  * @return MHI_STATUS
  */
 MHI_STATUS mhi_cmd_ring_init(mhi_cmd_ctxt *cmd_ctxt,
-		uintptr_t trb_list_phy_addr,
-		uintptr_t trb_list_virt_addr,
-		size_t el_per_ring, mhi_ring *ring)
+				uintptr_t trb_list_phy_addr,
+				uintptr_t trb_list_virt_addr,
+				size_t el_per_ring, mhi_ring *ring)
 {
 	cmd_ctxt->mhi_cmd_ring_base_addr = trb_list_phy_addr;
 	cmd_ctxt->mhi_cmd_ring_read_ptr = trb_list_phy_addr;
@@ -680,7 +679,7 @@ MHI_STATUS mhi_reset_all_thread_queues(mhi_device_ctxt *mhi_dev_ctxt)
 	MHI_STATUS ret_val = MHI_STATUS_SUCCESS;
 
 	mhi_init_state_change_thread_work_queue(
-			&mhi_dev_ctxt->state_change_work_item_list);
+				&mhi_dev_ctxt->state_change_work_item_list);
 	if (MHI_STATUS_SUCCESS != ret_val) {
 		mhi_log(MHI_MSG_ERROR, "Failed to reset STT work queue\n");
 		return ret_val;
@@ -694,10 +693,10 @@ MHI_STATUS mhi_init_timers(mhi_device_ctxt *mhi_dev_ctxt)
 			CLOCK_MONOTONIC,
 			HRTIMER_MODE_REL);
 	mhi_dev_ctxt->m1_timeout =
-		ktime_set(0, MHI_M1_ENTRY_DELAY_MS * 1E6L);
+			ktime_set(0, MHI_M1_ENTRY_DELAY_MS * 1E6L);
 	mhi_dev_ctxt->m1_timer.function = mhi_initiate_M1;
 	mhi_log(MHI_MSG_CRITICAL | MHI_DBG_POWER,
-			"Starting M1 timer\n");
+		"Starting M1 timer\n");
 	return MHI_STATUS_SUCCESS;
 }
 MHI_STATUS mhi_init_work_queues(mhi_device_ctxt *mhi_dev_ctxt)
@@ -705,7 +704,7 @@ MHI_STATUS mhi_init_work_queues(mhi_device_ctxt *mhi_dev_ctxt)
 	mhi_dev_ctxt->work_queue = create_singlethread_workqueue("mhi");
 	if (NULL == mhi_dev_ctxt->work_queue) {
 		mhi_log(MHI_MSG_CRITICAL | MHI_DBG_POWER,
-				"Failed to create MHI work queue.\n");
+			"Failed to create MHI work queue.\n");
 		return MHI_STATUS_ERROR;
 	}
 	INIT_DELAYED_WORK(&mhi_dev_ctxt->m3_work, delayed_m3);

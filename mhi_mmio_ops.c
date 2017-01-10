@@ -26,7 +26,7 @@ MHI_STATUS mhi_test_for_device_ready(mhi_device_ctxt *mhi_dev_ctxt)
 	mhi_log(MHI_MSG_INFO, "Waiting for MMIO Ready bit to be set\n");
 
 	/* Read MMIO and poll for READY bit to be set */
-	pcie_word_val = pcie_read(mhi_dev_ctxt->mmio_addr, MHISTATUS);
+	pcie_read(mhi_dev_ctxt->mmio_addr, MHISTATUS, pcie_word_val);
 	MHI_READ_FIELD(pcie_word_val,
 			MHISTATUS_READY_MASK,
 			MHISTATUS_READY_SHIFT);
@@ -39,7 +39,7 @@ MHI_STATUS mhi_test_for_device_ready(mhi_device_ctxt *mhi_dev_ctxt)
 		mhi_log(MHI_MSG_ERROR,
 			"Device is not ready, sleeping and retrying.\n");
 		msleep(MHI_READY_STATUS_TIMEOUT_MS);
-		pcie_word_val = pcie_read(mhi_dev_ctxt->mmio_addr, MHISTATUS);
+		pcie_read(mhi_dev_ctxt->mmio_addr, MHISTATUS, pcie_word_val);
 		MHI_READ_FIELD(pcie_word_val,
 				MHISTATUS_READY_MASK, MHISTATUS_READY_SHIFT);
 	}
@@ -64,7 +64,7 @@ MHI_STATUS mhi_init_mmio(mhi_device_ctxt *mhi_dev_ctxt)
 	mhi_log(MHI_MSG_INFO, "Bar 0 address is at: 0x%lX\n",
 			(mhi_dev_ctxt->mmio_addr));
 
-	mhi_dev_ctxt->mmio_len = pcie_read(mhi_dev_ctxt->mmio_addr, MHIREGLEN);
+	pcie_read(mhi_dev_ctxt->mmio_addr, MHIREGLEN, mhi_dev_ctxt->mmio_len);
 
 	if (0 == mhi_dev_ctxt->mmio_len) {
 		mhi_log(MHI_MSG_ERROR, "Received mmio length as zero\n");
@@ -72,8 +72,8 @@ MHI_STATUS mhi_init_mmio(mhi_device_ctxt *mhi_dev_ctxt)
 	}
 
 	mhi_log(MHI_MSG_INFO, "Testing MHI Ver\n");
-	mhi_dev_ctxt->dev_props->mhi_ver = pcie_read(mhi_dev_ctxt->mmio_addr,
-							MHIVER);
+	pcie_read(mhi_dev_ctxt->mmio_addr,
+		  MHIVER, mhi_dev_ctxt->dev_props->mhi_ver);
 	if (MHI_VERSION != mhi_dev_ctxt->dev_props->mhi_ver) {
 		mhi_log(MHI_MSG_CRITICAL, "Bad MMIO version, 0x%x\n",
 					mhi_dev_ctxt->dev_props->mhi_ver);

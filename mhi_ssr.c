@@ -14,7 +14,7 @@
 #include <mhi.h>
 extern mhi_pcie_devices mhi_devices;
 int mhi_ssr_notify_cb(struct notifier_block *nb,
-		unsigned long action, void *data);
+			unsigned long action, void *data);
 
 
 static struct notifier_block mhi_ssr_nb = {
@@ -25,10 +25,10 @@ static void esoc_parse_link_type(mhi_device_ctxt* mhi_dev_ctxt)
 {
 	int ret_val;
 	ret_val = strncmp(mhi_dev_ctxt->esoc_handle->link,
-			"HSIC+PCIe",
-			sizeof("HSIC+PCIe"));
+				"HSIC+PCIe",
+				sizeof("HSIC+PCIe"));
 	mhi_log(MHI_MSG_VERBOSE, "Link type is %s as indicated by ESOC\n",
-			mhi_dev_ctxt->esoc_handle->link);
+					mhi_dev_ctxt->esoc_handle->link);
 	if (ret_val)
 		mhi_dev_ctxt->base_state = STATE_TRANSITION_BHI;
 	else
@@ -46,25 +46,25 @@ int mhi_esoc_register(mhi_device_ctxt* mhi_dev_ctxt)
 	np = dev->of_node;
 	mhi_dev_ctxt->esoc_handle = devm_register_esoc_client(dev, "mdm");
 	mhi_log(MHI_MSG_VERBOSE,
-			"Of table of pcie device property is dev->of_node %p \n",
-			np);
+		"Of table of pcie device property is dev->of_node %p \n",
+		np);
 	if (IS_ERR_OR_NULL(mhi_dev_ctxt->esoc_handle)) {
 		mhi_log(MHI_MSG_CRITICAL,
-				"Failed to register for SSR, ret %lx\n",
-				(uintptr_t)mhi_dev_ctxt->esoc_handle);
+			"Failed to register for SSR, ret %lx\n",
+			(uintptr_t)mhi_dev_ctxt->esoc_handle);
 		return -EIO;
 	}
 
 	esoc_parse_link_type(mhi_dev_ctxt);
 
 	mhi_dev_ctxt->esoc_ssr_handle = subsys_notif_register_notifier(
-			mhi_dev_ctxt->esoc_handle->name,
-			&mhi_ssr_nb);
+					mhi_dev_ctxt->esoc_handle->name,
+					&mhi_ssr_nb);
 	if (IS_ERR_OR_NULL(mhi_dev_ctxt->esoc_ssr_handle)) {
 		ret_val = PTR_RET(mhi_dev_ctxt->esoc_ssr_handle);
 		mhi_log(MHI_MSG_CRITICAL,
-				"Can't find esoc desc ret 0x%lx\n",
-				(uintptr_t)mhi_dev_ctxt->esoc_ssr_handle);
+			"Can't find esoc desc ret 0x%lx\n",
+			(uintptr_t)mhi_dev_ctxt->esoc_ssr_handle);
 	}
 
 	return ret_val;
@@ -84,7 +84,7 @@ void mhi_notify_clients(mhi_device_ctxt *mhi_dev_ctxt, MHI_CB_REASON reason)
 			cb_info.result = NULL;
 			cb_info.cb_reason = reason;
 			if (NULL != client_handle &&
-					NULL != client_handle->client_info.mhi_client_cb) {
+			    NULL != client_handle->client_info.mhi_client_cb) {
 				result.user_data = client_handle->user_data;
 				cb_info.result = &result;
 				client_handle->client_info.mhi_client_cb(&cb_info);
@@ -96,14 +96,13 @@ void mhi_notify_clients(mhi_device_ctxt *mhi_dev_ctxt, MHI_CB_REASON reason)
 void mhi_link_state_cb(struct msm_pcie_notify *notify)
 {
 	MHI_STATUS ret_val = MHI_STATUS_SUCCESS;
-	mhi_pcie_dev_info *mhi_pcie_dev;
+	mhi_pcie_dev_info *mhi_pcie_dev = notify->data;
 	mhi_device_ctxt *mhi_dev_ctxt = NULL;
 	if (NULL == notify || NULL == notify->data) {
 		mhi_log(MHI_MSG_CRITICAL,
-				"Incomplete handle received\n");
+		"Incomplete handle received\n");
 		return;
 	}
-	mhi_pcie_dev = notify->data;
 	mhi_dev_ctxt = mhi_pcie_dev->mhi_ctxt;
 	switch (notify->event){
 	case MSM_PCIE_EVENT_LINKDOWN:
@@ -128,8 +127,8 @@ void mhi_link_state_cb(struct msm_pcie_notify *notify)
 	case MSM_PCIE_EVENT_WAKEUP:
 		mhi_log(MHI_MSG_CRITICAL,
 			"Received MSM_PCIE_EVENT_WAKE\n");
-		__pm_stay_awake(&mhi_dev_ctxt->wake_lock);
-		__pm_relax(&mhi_dev_ctxt->wake_lock);
+		mhi_wake(mhi_dev_ctxt);
+		mhi_wake_relax(mhi_dev_ctxt);
 		if (atomic_read(&mhi_dev_ctxt->flags.pending_resume)) {
 			mhi_log(MHI_MSG_INFO,
 				"There is a pending resume, doing nothing \n");
@@ -151,25 +150,23 @@ void mhi_link_state_cb(struct msm_pcie_notify *notify)
 		}
 }
 int mhi_ssr_notify_cb(struct notifier_block *nb,
-		unsigned long action, void *data)
+			unsigned long action, void *data)
 {
 	int ret_val = 0;
 	mhi_device_ctxt *mhi_dev_ctxt = mhi_devices.device_list[0].mhi_ctxt;
-	mhi_pcie_dev_info *mhi_pcie_dev = NULL;
-	mhi_pcie_dev = &mhi_devices.device_list[mhi_devices.nr_of_devices];
 	if (NULL != mhi_dev_ctxt)
 		mhi_dev_ctxt->esoc_notif = action;
 	switch (action) {
-		case SUBSYS_AFTER_SHUTDOWN:
-			mhi_log(MHI_MSG_INFO, "Received Subsystem event AFTER_SHUTDOWN\n");
-			ret_val = mhi_init_state_transition(mhi_dev_ctxt,
-					STATE_TRANSITION_LINK_DOWN);
-			if (MHI_STATUS_SUCCESS != ret_val) {
-				mhi_log(MHI_MSG_CRITICAL,
-						"Failed to init state transition, to %d\n",
-						STATE_TRANSITION_LINK_DOWN);
-			}
-			break;
+		case SUBSYS_BEFORE_SHUTDOWN:
+			mhi_log(MHI_MSG_INFO, "Received Subsystem event BEFORE_SHUTDOWN\n");
+		ret_val = mhi_init_state_transition(mhi_dev_ctxt,
+				STATE_TRANSITION_LINK_DOWN);
+		if (MHI_STATUS_SUCCESS != ret_val) {
+			mhi_log(MHI_MSG_CRITICAL,
+				"Failed to init state transition, to %d\n",
+				STATE_TRANSITION_LINK_DOWN);
+		}
+		break;
 	}
 	return NOTIFY_OK;
 }
@@ -183,14 +180,14 @@ MHI_STATUS init_mhi_base_state(mhi_device_ctxt* mhi_dev_ctxt)
 	mhi_dev_ctxt->flags.link_up = 1;
 	r = mhi_set_bus_request(mhi_dev_ctxt, 1);
 	if (r)
-		mhi_log(MHI_MSG_INFO,
-				"Failed to scale bus request to active set.\n");
+	mhi_log(MHI_MSG_INFO,
+		"Failed to scale bus request to active set.\n");
 	ret_val = mhi_init_state_transition(mhi_dev_ctxt,
 			mhi_dev_ctxt->base_state);
 	if (MHI_STATUS_SUCCESS != ret_val) {
 		mhi_log(MHI_MSG_CRITICAL,
-				"Failed to start state change event, to %d\n",
-				mhi_dev_ctxt->base_state);
+		"Failed to start state change event, to %d\n",
+		mhi_dev_ctxt->base_state);
 	}
 	return ret_val;
 }

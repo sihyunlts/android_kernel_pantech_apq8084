@@ -12,7 +12,7 @@
 #ifndef _H_MHI_MACROS
 #define _H_MHI_MACROS
 
-#define MHI_IPC_LOG_PAGES (10)
+#define MHI_IPC_LOG_PAGES (50)
 #define MHI_LINK_STABILITY_WAIT_MS 100
 #define MHI_MAX_LINK_RETRIES 9
 #define MHI_MAX_SUSPEND_RETRIES 1000
@@ -25,6 +25,7 @@
 #define MHI_EPID 4
 #define MHI_MAX_RESUME_TIMEOUT 5000
 #define MHI_MAX_SUSPEND_TIMEOUT 5000
+#define MHI_MAX_INIT_M0_TIMEOUT 1000
 
 #define MAX_NR_MSI 4
 
@@ -40,7 +41,7 @@
 #define MAX_XFER_WORK_ITEMS 100
 #define MHI_MAX_SUPPORTED_DEVICES 1
 
-#define MAX_NR_TRBS_PER_SOFT_CHAN 15
+#define MAX_NR_TRBS_PER_SOFT_CHAN 10
 #define MAX_NR_TRBS_PER_HARD_CHAN (128 + 16)
 #define MHI_PCIE_VENDOR_ID 0x17CB
 #define MHI_PCIE_DEVICE_ID 0x0300
@@ -204,7 +205,12 @@
 
 #define MHI_REG_WRITE(_base, _offset, _val) \
 	do { \
-		pcie_write(_base, _offset, _val);               \
+		u32 addr; \
+		(addr) = (u32)(_base) + (u32)(_offset); \
+		timestamp_log(addr); \
+		*(volatile u32 *)(addr) = (_val); \
+		wmb(); \
+		PULSE_L1_EXIT(0);				\
 		mhi_log(MHI_MSG_INFO, "d.s 0x%x %%LONG 0x%x\n", \
 				(u32)(_offset),\
 				(u32)(_val)); \
@@ -223,6 +229,7 @@
 	do { \
 		u32 addr; \
 		(addr) = (u32)(_base) + (u32)(_offset); \
+		timestamp_log(addr); \
 		(_dest) = *(volatile u32 *)(addr); \
 	} while (0)
 
@@ -246,6 +253,7 @@
 	mhi_log(MHI_MSG_VERBOSE,						\
 			"db.set addr: 0x%llX offset 0x%x val:0x%llX\n",		\
 			(u64)_addr, (unsigned int)_index, (u64)_val);		\
+	wmb();									\
 	if (mhi_dev_ctxt->channel_db_addr == (_addr)) {				\
 		(_mhi_dev_ctxt)->mhi_ctrl_seg->mhi_cc_list[_index].mhi_trb_write_ptr = (_val);  \
 	} else if (mhi_dev_ctxt->event_db_addr == (_addr)) {				     \
@@ -285,6 +293,12 @@
 		mhi_dev_ctxt->db_mode[_index] = 0;   \
 	}					     \
 }
+
+#define PULSE_L1_EXIT(_dev) msm_pcie_pm_control(MSM_PCIE_REQ_EXIT_L1,	\
+			mhi_devices.device_list[_dev].pcie_device->bus->number, \
+			mhi_devices.device_list[_dev].pcie_device, \
+			NULL, \
+			0)
 
 #define EVENT_RING_MSI_VEC
 #define MHI_EVENT_RING_MSI_VEC__MASK (0xf)

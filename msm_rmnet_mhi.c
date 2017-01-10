@@ -257,7 +257,7 @@ static int rmnet_mhi_poll(struct napi_struct *napi, int budget)
 
 		cb_ptr = (uintptr_t *)skb->cb;
 		dma_addr = dma_map_single(&(dev->dev), skb->data,
-					  rmnet_mhi_ptr->mru - MHI_RX_HEADROOM,
+					 rmnet_mhi_ptr->mru - MHI_RX_HEADROOM,
 					  DMA_FROM_DEVICE);
 		*cb_ptr = (uintptr_t)dma_addr;
 
@@ -265,7 +265,7 @@ static int rmnet_mhi_poll(struct napi_struct *napi, int budget)
 			pr_err("%s: DMA mapping error in polling function",
 			       __func__);
 			/* TODO: Handle error */
-			kfree_skb(skb);
+			dev_kfree_skb_irq(skb);
 			break;
 		}
 
@@ -279,7 +279,7 @@ static int rmnet_mhi_poll(struct napi_struct *napi, int budget)
 			dma_unmap_single(&(dev->dev), dma_addr,
 					(rmnet_mhi_ptr->mru - MHI_RX_HEADROOM),
 							 DMA_FROM_DEVICE);
-			kfree_skb(skb);
+			dev_kfree_skb_irq(skb);
 			break;
 		}
 
@@ -295,7 +295,7 @@ static int rmnet_mhi_poll(struct napi_struct *napi, int budget)
 					(rmnet_mhi_ptr->mru - MHI_RX_HEADROOM),
 							 DMA_FROM_DEVICE);
 
-			kfree_skb(skb);
+			dev_kfree_skb_irq(skb);
 			break;
 		}
 
@@ -343,84 +343,84 @@ void rmnet_mhi_tx_cb(mhi_cb_info *cb_info)
 		rmnet_mhi_ptr = netdev_priv(dev);
 	}
 	switch (cb_info->cb_reason) {
-		case MHI_CB_MHI_DISABLED:
-			pr_err("%s: Got SSR notification %d from MHI CORE. Stopping stack.",
-					__func__, cb_info->cb_reason);
-			netif_stop_queue(dev);
-			break;
-		case MHI_CB_MHI_ENABLED:
-			pr_err("%s: Got SSR notification %d from MHI CORE. Starting stack.",
-					__func__, cb_info->cb_reason);
-			netif_start_queue(dev);
-			break;
-		case MHI_CB_XFER_SUCCESS:
-			tx_interrupts_count[rmnet_mhi_ptr->dev_index]++;
+	case MHI_CB_MHI_DISABLED:
+		pr_err("%s: Got SSR notification %d from MHI CORE. Stopping stack.",
+		       __func__, cb_info->cb_reason);
+		netif_stop_queue(dev);
+		break;
+	case MHI_CB_MHI_ENABLED:
+		pr_err("%s: Got SSR notification %d from MHI CORE. Starting stack.",
+		       __func__, cb_info->cb_reason);
+		netif_start_queue(dev);
+		break;
+	case MHI_CB_XFER_SUCCESS:
+	tx_interrupts_count[rmnet_mhi_ptr->dev_index]++;
 
-			if (0 == result->payload_buf || 0 == result->bytes_xferd) {
-				return;
+	if (0 == result->payload_buf || 0 == result->bytes_xferd) {
+		return;
+	}
+
+	/* TODO: The code below might be "too much" for this TX context.
+	   There might be a need to either optimize this code or move it to
+	   a different thread/task */
+
+	/* Free the buffers which are TX'd up to the provided address */
+	while (!skb_queue_empty(&(rmnet_mhi_ptr->tx_buffers))) {
+		struct sk_buff *skb = skb_dequeue(&(rmnet_mhi_ptr->tx_buffers));
+		if (0 == skb) {
+			/* Indicates an error and MHI Core should be reset */
+			MHI_STATUS ret;
+			ret = mhi_reset_channel(
+				rmnet_mhi_ptr->tx_client_handle);
+			if (MHI_STATUS_SUCCESS != ret) {
+				pr_err("%s: Channel reset failed, error %d",
+				       __func__, ret);
+				/* TODO: How do we handle this error? */
 			}
-
-			/* TODO: The code below might be "too much" for this TX context.
-			   There might be a need to either optimize this code or move it to
-			   a different thread/task */
-
-			/* Free the buffers which are TX'd up to the provided address */
-			while (!skb_queue_empty(&(rmnet_mhi_ptr->tx_buffers))) {
-				struct sk_buff *skb = skb_dequeue(&(rmnet_mhi_ptr->tx_buffers));
-				if (0 == skb) {
-					/* Indicates an error and MHI Core should be reset */
-					MHI_STATUS ret;
-					ret = mhi_reset_channel(
-							rmnet_mhi_ptr->tx_client_handle);
-					if (MHI_STATUS_SUCCESS != ret) {
-						pr_err("%s: Channel reset failed, error %d",
-								__func__, ret);
-						/* TODO: How do we handle this error? */
-					}
-					break;
-				} else {
-					struct tx_buffer_priv *tx_priv =
-						(struct tx_buffer_priv *)(skb->cb);
-					dma_addr_t dma_addr = tx_priv->dma_addr;
-					int data_len = skb->len;
-
-					/* Re-use the bounce buffer */
-					if (tx_priv->is_bounce_buffer)
-						skb_queue_tail(
-								&(rmnet_mhi_ptr->tx_bounce_buffers),
-								skb);
-					else {
-						dma_unmap_single(&(dev->dev), dma_addr,
-								skb->len, DMA_TO_DEVICE);
-			                  	kfree_skb(skb);
-					}
-					burst_counter++;
-
-					/* Update statistics */
-					dev->stats.tx_packets++;
-					dev->stats.tx_bytes += data_len;
-
-					/* The payload is expected to be the physical address.
-					   Comparing to see if it's the last skb to replenish */
-					if (dma_addr == (dma_addr_t)(uintptr_t)result->payload_buf)
-						break;
-				}
-			} /* While TX queue is not empty */
-
-			tx_cb_skb_free_burst_min[rmnet_mhi_ptr->dev_index] =
-				min(burst_counter,
-						tx_cb_skb_free_burst_min[rmnet_mhi_ptr->dev_index]);
-
-			tx_cb_skb_free_burst_max[rmnet_mhi_ptr->dev_index] =
-				max(burst_counter,
-						tx_cb_skb_free_burst_max[rmnet_mhi_ptr->dev_index]);
-
-			/* In case we couldn't write again, now we can! */
-			netif_wake_queue(dev);
 			break;
+		} else {
+			struct tx_buffer_priv *tx_priv =
+				(struct tx_buffer_priv *)(skb->cb);
+			dma_addr_t dma_addr = tx_priv->dma_addr;
+			int data_len = skb->len;
+
+			/* Re-use the bounce buffer */
+			if (tx_priv->is_bounce_buffer)
+				skb_queue_tail(
+					&(rmnet_mhi_ptr->tx_bounce_buffers),
+					skb);
+			else {
+				dma_unmap_single(&(dev->dev), dma_addr,
+						 skb->len, DMA_TO_DEVICE);
+				dev_kfree_skb_irq(skb);
+			}
+			burst_counter++;
+
+			/* Update statistics */
+			dev->stats.tx_packets++;
+			dev->stats.tx_bytes += data_len;
+
+			/* The payload is expected to be the physical address.
+			   Comparing to see if it's the last skb to replenish */
+			if (dma_addr == (dma_addr_t)(uintptr_t)result->payload_buf)
+				break;
+		}
+	} /* While TX queue is not empty */
+
+	tx_cb_skb_free_burst_min[rmnet_mhi_ptr->dev_index] =
+		min(burst_counter,
+		    tx_cb_skb_free_burst_min[rmnet_mhi_ptr->dev_index]);
+
+	tx_cb_skb_free_burst_max[rmnet_mhi_ptr->dev_index] =
+		max(burst_counter,
+		    tx_cb_skb_free_burst_max[rmnet_mhi_ptr->dev_index]);
+
+	/* In case we couldn't write again, now we can! */
+	netif_wake_queue(dev);
+		break;
 		default:
 			pr_err("%s: Got SSR notification %d from MHI CORE.",
-					__func__, cb_info->cb_reason);
+		       __func__, cb_info->cb_reason);
 			break;
 	}
 }
@@ -559,8 +559,8 @@ static int rmnet_mhi_open(struct net_device *dev)
 		cb_ptr = (uintptr_t *)skb->cb;
 
 		dma_addr = dma_map_single(&(dev->dev), skb->data,
-				      (rmnet_mhi_ptr->mru - MHI_RX_HEADROOM),
-				      DMA_FROM_DEVICE);
+					  (rmnet_mhi_ptr->mru - MHI_RX_HEADROOM),
+					  DMA_FROM_DEVICE);
 		*cb_ptr = (uintptr_t)dma_addr;
 		if (dma_mapping_error(&(dev->dev), dma_addr)) {
 			pr_err("%s: DMA mapping for RX buffers has failed",

@@ -14,7 +14,7 @@
 #define _H_MHI
 
 #include <mach/msm_pcie.h>
-#include <msm_mhi.h>
+#include "msm_mhi.h"
 #include "mhi_macros.h"
 #include <linux/types.h>
 #include <linux/spinlock_types.h>
@@ -40,8 +40,7 @@ typedef enum MHI_DEBUG_CLASS {
 } MHI_DEBUG_CLASS;
 
 typedef enum MHI_DEBUG_LEVEL {
-	MHI_MSG_VERBOSE = 0x0,
-	MHI_MSG_MSI_WAKE_GPIO = 0x1,
+	MHI_MSG_VERBOSE = 0x1,
 	MHI_MSG_INFO = 0x2,
 	MHI_MSG_DBG = 0x4,
 	MHI_MSG_WARNING = 0x8,
@@ -402,7 +401,6 @@ typedef struct mhi_counters {
 	u32 msi_enable_cntr;
 	u32 nr_irq_migrations;
 	atomic_t outbound_acks;
-	u32 failed_recycle[MHI_RING_TYPE_MAX];
 } mhi_counters;
 
 typedef struct mhi_flags {
@@ -498,25 +496,25 @@ struct mhi_device_ctxt {
 
 	unsigned long esoc_notif;
 	STATE_TRANSITION base_state;
-	atomic_t outbound_acks;
 	struct mutex pm_lock;
 	struct wakeup_source wake_lock;
 	int enable_lpm;
 };
+extern void timestamp_log(uint64_t reg);
 
 MHI_STATUS mhi_reset_all_thread_queues(mhi_device_ctxt *mhi_dev_ctxt);
 
 MHI_STATUS mhi_add_elements_to_event_rings(mhi_device_ctxt *mhi_dev_ctxt,
-		STATE_TRANSITION new_state);
+					STATE_TRANSITION new_state);
 MHI_STATUS validate_xfer_el_addr(mhi_chan_ctxt *ring, uintptr_t addr);
 int get_nr_avail_ring_elements(mhi_ring *ring);
 MHI_STATUS get_nr_enclosed_el(mhi_ring *ring, void *loc_1,
-		void *loc_2, u32 *nr_el);
+					void *loc_2, u32 *nr_el);
 MHI_STATUS mhi_init_contexts(mhi_device_ctxt *mhi_dev_ctxt);
 MHI_STATUS mhi_init_device_ctrl(mhi_device_ctxt *mhi_dev_ctxt);
 MHI_STATUS mhi_init_mmio(mhi_device_ctxt *mhi_dev_ctxt);
 MHI_STATUS mhi_init_device_ctxt(mhi_pcie_dev_info *dev_info,
-		mhi_device_ctxt **mhi_dev_ctxt);
+				mhi_device_ctxt **mhi_dev_ctxt);
 
 
 MHI_STATUS mhi_init_event_ring(mhi_device_ctxt *mhi_dev_ctxt,
@@ -668,5 +666,7 @@ int mhi_initiate_m0(mhi_device_ctxt *mhi_dev_ctxt);
 int mhi_initiate_m3(mhi_device_ctxt *mhi_dev_ctxt);
 int mhi_set_bus_request(struct mhi_device_ctxt *mhi_dev_ctxt,
 					int index);
+void mhi_wake_relax(struct mhi_device_ctxt *mhi_dev_ctxt);
+void mhi_wake(struct mhi_device_ctxt *mhi_dev_ctxt);
 
 #endif
