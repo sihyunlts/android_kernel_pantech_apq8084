@@ -147,13 +147,26 @@ static void dwc3_otg_set_peripheral_regs(struct dwc3_otg *dotg)
 	}
 }
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+static int dwc3_otg_vbus_event(struct notifier_block *nb,
+			     unsigned long event, void *data)
+{
+	struct dwc3_otg *dotg = container_of(nb, struct dwc3_otg, vbus_notifier);
+
+	if (!(event & REGULATOR_EVENT_FAIL))
+		return NOTIFY_DONE;
+	ACCESS_ONCE(dotg->vbus_fault) = true;
+	mod_delayed_work(system_nrt_wq, &dotg->sm_work, 0);
+	return NOTIFY_OK;
+}
+#endif
+
 /**
- * dwc3_otg_start_host -  helper function for starting/stoping the host controller driver.
+ * dwc3_otg_start_host - start or stop the host controller driver
+ * @otg: USB OTG transceiver
+ * @on: start or stop the host controller
  *
- * @otg: Pointer to the otg_transceiver structure.
- * @on: start / stop the host controller driver.
- *
- * Returns 0 on success otherwise negative errno.
+ * Returns 0 on success or a negative errno.
  */
 static int dwc3_otg_start_host(struct usb_otg *otg, int on)
 {
@@ -175,6 +188,15 @@ static int dwc3_otg_start_host(struct usb_otg *otg, int on)
 			dotg->vbus_otg = 0;
 			return ret;
 		}
+#ifdef CONFIG_MACH_APQ8084_EF67
+		dotg->vbus_notifier.notifier_call = dwc3_otg_vbus_event;
+		ret = regulator_register_notifier(dotg->vbus_otg, &dotg->vbus_notifier);
+		if (ret) {
+			devm_regulator_put(dotg->vbus_otg);
+			dotg->vbus_otg = NULL;
+			return ret;
+		}
+#endif
 	}
 
 	if (on) {
@@ -693,6 +715,10 @@ static void dwc3_otg_sm_work(struct work_struct *w)
 
 	pm_runtime_resume(phy->dev);
 	dev_dbg(phy->dev, "%s state\n", usb_otg_state_string(phy->state));
+#ifdef CONFIG_MACH_APQ8084_EF67
+	if (test_bit(ID, &dotg->inputs) && phy->state != OTG_STATE_A_HOST)
+		ACCESS_ONCE(dotg->vbus_fault) = false;
+#endif
 
 	/* Check OTG state */
 	switch (phy->state) {
@@ -839,6 +865,12 @@ static void dwc3_otg_sm_work(struct work_struct *w)
 			dotg->vbus_retry_count = 0;
 			work = 1;
 		} else {
+#ifdef CONFIG_MACH_APQ8084_EF67
+			if (ACCESS_ONCE(dotg->vbus_fault)) {
+				pm_runtime_idle(phy->dev);
+				return;
+			}
+#endif
 			phy->state = OTG_STATE_A_HOST;
 			ret = dwc3_otg_start_host(&dotg->otg, 1);
 			if ((ret == -EPROBE_DEFER) &&
@@ -876,9 +908,29 @@ static void dwc3_otg_sm_work(struct work_struct *w)
 		break;
 
 	case OTG_STATE_A_HOST:
+#ifdef CONFIG_MACH_APQ8084_EF67
+		if (ACCESS_ONCE(dotg->vbus_fault)) {
+			ret = dwc3_otg_start_host(&dotg->otg, 0);
+			if (ret) {
+				queue_delayed_work(system_nrt_wq, &dotg->sm_work,
+						  VBUS_REG_CHECK_DELAY);
+				return;
+			}
+			phy->state = OTG_STATE_A_IDLE;
+			work = 1;
+			break;
+		}
+#endif
 		if (test_bit(ID, &dotg->inputs)) {
 			dev_dbg(phy->dev, "id\n");
-			dwc3_otg_start_host(&dotg->otg, 0);
+			ret = dwc3_otg_start_host(&dotg->otg, 0);
+#ifdef CONFIG_MACH_APQ8084_EF67
+			if (ret) {
+				queue_delayed_work(system_nrt_wq, &dotg->sm_work,
+						  VBUS_REG_CHECK_DELAY);
+				return;
+			}
+#endif
 			phy->state = OTG_STATE_B_IDLE;
 			dotg->vbus_retry_count = 0;
 			work = 1;
@@ -1045,6 +1097,14 @@ void dwc3_otg_exit(struct dwc3 *dwc)
 		if (dotg->charger)
 			dotg->charger->start_detection(dotg->charger, false);
 		cancel_delayed_work_sync(&dotg->sm_work);
+#ifdef CONFIG_MACH_APQ8084_EF67
+		if (dotg->vbus_otg) {
+			regulator_unregister_notifier(dotg->vbus_otg,
+						      &dotg->vbus_notifier);
+			/* Drain notifications queued during the first cancellation. */
+			cancel_delayed_work_sync(&dotg->sm_work);
+		}
+#endif
 		pm_runtime_put(dwc->dev);
 		free_irq(dotg->irq, dotg);
 		dwc->dotg = NULL;

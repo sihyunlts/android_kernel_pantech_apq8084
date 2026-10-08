@@ -34,6 +34,7 @@
 #include <linux/workqueue.h>
 #include <mach/gpiomux.h>
 #include <linux/msm_tsens.h>
+#include <linux/regulator/consumer.h>
 #include <soc/qcom/smem.h>
 #endif
 
@@ -300,6 +301,7 @@ struct smb135x_regulator {
 #define EF67_BOOT_DATA_SIZE 44
 #define EF67_BOOT_FACTORY_ADC_WORD 1
 #define EF67_BOOT_POWER_ON_MODE_WORD 4
+#define EF67_OTG_MIN_CAPACITY 10
 
 static struct gpiomux_setting ef67_ovp_setting = {
 	.func = GPIOMUX_FUNC_GPIO,
@@ -438,6 +440,8 @@ struct smb135x_chg {
 	int				ap_usb_limit_ma;
 	int				usb_input_limit_ma;
 	int				applied_usb_current_ma;
+	bool				otg_enabled;
+	bool				otg_stop_pending;
 #endif
 	struct delayed_work		wireless_insertion_work;
 
@@ -1502,6 +1506,22 @@ inhibit:
 	return rc;
 }
 
+/* Called with current_change_lock held. */
+static int ef67_check_otg_battery(struct smb135x_chg *chip)
+{
+	union power_supply_propval capacity;
+	int rc;
+
+	if (!smb135x_get_prop_batt_present(chip))
+		return -ENODEV;
+	rc = smb135x_get_bms_property(chip, POWER_SUPPLY_PROP_CAPACITY, &capacity);
+	if (rc)
+		return rc;
+	if (capacity.intval < 0 || capacity.intval > 100)
+		return -ERANGE;
+	return capacity.intval < EF67_OTG_MIN_CAPACITY ? -EPERM : 0;
+}
+
 static enum alarmtimer_restart ef67_thermal_alarm(struct alarm *alarm,
 						ktime_t now)
 {
@@ -1517,8 +1537,8 @@ static void ef67_thermal_work(struct work_struct *work)
 {
 	struct smb135x_chg *chip = container_of(to_delayed_work(work),
 					struct smb135x_chg, thermal_work);
-	bool was_enabled, changed, charging_changed;
-	int last_temp, rc;
+	bool was_enabled, changed, charging_changed, otg_fault = false;
+	int last_temp, rc, stop_rc;
 
 	__pm_stay_awake(&chip->thermal_wake);
 	mutex_lock(&chip->current_change_lock);
@@ -1526,6 +1546,19 @@ static void ef67_thermal_work(struct work_struct *work)
 		goto out;
 	was_enabled = chip->chg_enabled;
 	last_temp = chip->last_temp_decic;
+	if (chip->otg_enabled) {
+		if (chip->otg_stop_pending || ef67_check_otg_battery(chip)) {
+			chip->otg_stop_pending = true;
+			stop_rc = smb135x_masked_write(chip, CMD_CHG_REG, OTG_EN, 0);
+			if (stop_rc)
+				dev_err(chip->dev, "Couldn't stop OTG rc=%d\n", stop_rc);
+			else {
+				chip->otg_enabled = false;
+				chip->otg_stop_pending = false;
+			}
+			otg_fault = true;
+		}
+	}
 	rc = ef67_recover_input(chip);
 	if (rc)
 		dev_err(chip->dev, "Couldn't check input recovery rc=%d\n", rc);
@@ -1534,7 +1567,7 @@ static void ef67_thermal_work(struct work_struct *work)
 		dev_err(chip->dev, "Battery thermal check failed rc=%d\n", rc);
 	charging_changed = was_enabled != chip->chg_enabled;
 	changed = charging_changed || last_temp != chip->last_temp_decic || rc;
-	if (chip->usb_present ||
+	if (chip->otg_enabled || chip->usb_present ||
 	    (chip->dc_psy_type != -EINVAL && chip->dc_present))
 		alarm_start_relative(&chip->thermal_alarm,
 				     ns_to_ktime((s64)EF67_THERMAL_POLL_MS * NSEC_PER_MSEC));
@@ -1542,6 +1575,12 @@ static void ef67_thermal_work(struct work_struct *work)
 		queue_delayed_work(system_freezable_wq, &chip->thermal_work,
 				   msecs_to_jiffies(EF67_THERMAL_POLL_MS));
 	mutex_unlock(&chip->current_change_lock);
+	if (otg_fault && chip->otg_vreg.rdev) {
+		mutex_lock(&chip->otg_vreg.rdev->mutex);
+		regulator_notifier_call_chain(chip->otg_vreg.rdev,
+			REGULATOR_EVENT_FAIL, NULL);
+		mutex_unlock(&chip->otg_vreg.rdev->mutex);
+	}
 	if (changed)
 		power_supply_changed(&chip->batt_psy);
 	if (charging_changed)
@@ -1560,6 +1599,12 @@ static void ef67_stop_thermal(struct smb135x_chg *chip)
 	chip->thermal_allowed = false;
 	chip->charging_requested = false;
 	__smb135x_charging(chip, false);
+	if (smb135x_masked_write(chip, CMD_CHG_REG, OTG_EN, 0))
+		dev_err(chip->dev, "Couldn't stop OTG during removal\n");
+	else {
+		chip->otg_enabled = false;
+		chip->otg_stop_pending = false;
+	}
 	mutex_unlock(&chip->current_change_lock);
 	alarm_cancel(&chip->thermal_alarm);
 	cancel_delayed_work_sync(&chip->thermal_work);
@@ -2011,13 +2056,34 @@ static int smb135x_chg_otg_regulator_enable(struct regulator_dev *rdev)
 
 #ifdef CONFIG_MACH_APQ8084_EF67
 	mutex_lock(&chip->current_change_lock);
-	if (!chip->resume_completed) {
+	if (!chip->thermal_running) {
+		mutex_unlock(&chip->current_change_lock);
+		return -EPROBE_DEFER;
+	}
+	if (!chip->resume_completed || chip->otg_stop_pending) {
 		mutex_unlock(&chip->current_change_lock);
 		return -EBUSY;
 	}
+	rc = ef67_check_otg_battery(chip);
+	if (rc) {
+		mutex_unlock(&chip->current_change_lock);
+		return rc;
+	}
+	alarm_start_relative(&chip->thermal_alarm,
+			ns_to_ktime((s64)EF67_THERMAL_POLL_MS * NSEC_PER_MSEC));
 #endif
 	rc = __smb135x_chg_otg_regulator_enable(chip);
 #ifdef CONFIG_MACH_APQ8084_EF67
+	if (rc) {
+		int stop_rc = smb135x_masked_write(chip, CMD_CHG_REG, OTG_EN, 0);
+
+		if (stop_rc)
+			dev_err(chip->dev, "Couldn't undo OTG enable rc=%d\n", stop_rc);
+		chip->otg_enabled = !!stop_rc;
+		chip->otg_stop_pending = !!stop_rc;
+	} else {
+		chip->otg_enabled = true;
+	}
 	mutex_unlock(&chip->current_change_lock);
 #endif
 	return rc;
@@ -2028,9 +2094,19 @@ static int smb135x_chg_otg_regulator_disable(struct regulator_dev *rdev)
 	int rc = 0;
 	struct smb135x_chg *chip = rdev_get_drvdata(rdev);
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+	mutex_lock(&chip->current_change_lock);
+#endif
 	rc = smb135x_masked_write(chip, CMD_CHG_REG, OTG_EN, 0);
 	if (rc < 0)
 		dev_err(chip->dev, "Couldn't disable OTG mode rc=%d\n", rc);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	else {
+		chip->otg_enabled = false;
+		chip->otg_stop_pending = false;
+	}
+	mutex_unlock(&chip->current_change_lock);
+#endif
 	return rc;
 }
 
@@ -2040,7 +2116,17 @@ static int smb135x_chg_otg_regulator_is_enable(struct regulator_dev *rdev)
 	u8 reg = 0;
 	struct smb135x_chg *chip = rdev_get_drvdata(rdev);
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+	mutex_lock(&chip->current_change_lock);
+	if (chip->otg_stop_pending) {
+		mutex_unlock(&chip->current_change_lock);
+		return -EBUSY;
+	}
+#endif
 	rc = smb135x_read(chip, CMD_CHG_REG, &reg);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	mutex_unlock(&chip->current_change_lock);
+#endif
 	if (rc < 0) {
 		dev_err(chip->dev,
 				"Couldn't read OTG enable bit rc=%d\n", rc);
@@ -3949,7 +4035,7 @@ static int smb135x_suspend(struct device *dev)
 	int i, rc;
 
 #ifdef CONFIG_MACH_APQ8084_EF67
-	if ((chip->usb_present ||
+	if ((chip->otg_enabled || chip->usb_present ||
 	    (chip->dc_psy_type != -EINVAL && chip->dc_present)) && !alarmtimer_get_rtcdev())
 		return -EBUSY;
 	mutex_lock(&chip->current_change_lock);
@@ -4044,7 +4130,6 @@ static void smb135x_charger_shutdown(struct i2c_client *client)
 	struct smb135x_chg *chip = i2c_get_clientdata(client);
 
 	ef67_stop_thermal(chip);
-	smb135x_masked_write(chip, CMD_CHG_REG, OTG_EN, 0);
 }
 #endif
 

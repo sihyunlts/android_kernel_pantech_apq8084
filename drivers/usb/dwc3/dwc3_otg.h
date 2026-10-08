@@ -41,6 +41,10 @@ struct dwc3_otg {
 	struct dwc3		*dwc;
 	void __iomem		*regs;
 	struct regulator	*vbus_otg;
+#ifdef CONFIG_MACH_APQ8084_EF67
+	struct notifier_block	vbus_notifier;
+	bool			vbus_fault;
+#endif
 	struct delayed_work	sm_work;
 	struct dwc3_charger	*charger;
 	struct dwc3_ext_xceiv	*ext_xceiv;
