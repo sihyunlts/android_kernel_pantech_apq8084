@@ -310,7 +310,6 @@ struct smb135x_chg {
 	int				usb_psy_ma;
 	struct power_supply		batt_psy;
 	struct power_supply		dc_psy;
-	struct power_supply		*bms_psy;
 	int				dc_psy_type;
 	int				dc_psy_ma;
 	const char			*bms_psy_name;
@@ -556,6 +555,7 @@ static enum power_supply_property smb135x_battery_properties[] = {
 	POWER_SUPPLY_PROP_HEALTH,
 	POWER_SUPPLY_PROP_TECHNOLOGY,
 	POWER_SUPPLY_PROP_SYSTEM_TEMP_LEVEL,
+	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 };
 
 static int smb135x_get_prop_batt_status(struct smb135x_chg *chip)
@@ -632,19 +632,34 @@ static int smb135x_get_prop_charge_type(struct smb135x_chg *chip)
 }
 
 #define DEFAULT_BATT_CAPACITY	50
-static int smb135x_get_prop_batt_capacity(struct smb135x_chg *chip)
+static int smb135x_get_bms_property(struct smb135x_chg *chip,
+				  enum power_supply_property prop,
+				  union power_supply_propval *val)
 {
-	union power_supply_propval ret = {0, };
+	struct power_supply *bms;
 
-	if (chip->fake_battery_soc >= 0)
-		return chip->fake_battery_soc;
-	if (chip->bms_psy) {
-		chip->bms_psy->get_property(chip->bms_psy,
-				POWER_SUPPLY_PROP_CAPACITY, &ret);
-		return ret.intval;
+	if (!chip->bms_psy_name)
+		return -ENODEV;
+	bms = power_supply_get_by_name(chip->bms_psy_name);
+	if (!bms)
+		return -ENODEV;
+
+	return bms->get_property(bms, prop, val);
+}
+
+static int smb135x_get_prop_batt_capacity(struct smb135x_chg *chip,
+					union power_supply_propval *val)
+{
+	if (chip->fake_battery_soc >= 0) {
+		val->intval = chip->fake_battery_soc;
+		return 0;
 	}
+	if (chip->bms_psy_name)
+		return smb135x_get_bms_property(chip,
+					POWER_SUPPLY_PROP_CAPACITY, val);
 
-	return DEFAULT_BATT_CAPACITY;
+	val->intval = DEFAULT_BATT_CAPACITY;
+	return 0;
 }
 
 static int smb135x_get_prop_batt_health(struct smb135x_chg *chip)
@@ -1288,8 +1303,9 @@ static int smb135x_battery_get_property(struct power_supply *psy,
 		val->intval = smb135x_get_prop_charge_type(chip);
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
-		val->intval = smb135x_get_prop_batt_capacity(chip);
-		break;
+		return smb135x_get_prop_batt_capacity(chip, val);
+	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+		return smb135x_get_bms_property(chip, prop, val);
 	case POWER_SUPPLY_PROP_HEALTH:
 		val->intval = smb135x_get_prop_batt_health(chip);
 		break;
@@ -1341,10 +1357,6 @@ static void smb135x_external_power_changed(struct power_supply *psy)
 	union power_supply_propval prop = {0,};
 	int rc, current_limit = 0;
 
-	if (chip->bms_psy_name)
-		chip->bms_psy =
-			power_supply_get_by_name((char *)chip->bms_psy_name);
-
 	rc = chip->usb_psy->get_property(chip->usb_psy,
 				POWER_SUPPLY_PROP_CURRENT_MAX, &prop);
 	if (rc < 0)
@@ -1382,6 +1394,8 @@ static void smb135x_external_power_changed(struct power_supply *psy)
 	}
 	if (rc < 0)
 		dev_err(chip->dev, "could not set usb online, rc=%d\n", rc);
+
+	power_supply_changed(&chip->batt_psy);
 }
 
 #define MIN_FLOAT_MV	3600
@@ -3100,6 +3114,8 @@ static int smb135x_charger_probe(struct i2c_client *client,
 	chip->batt_psy.set_property	= smb135x_battery_set_property;
 	chip->batt_psy.properties	= smb135x_battery_properties;
 	chip->batt_psy.num_properties  = ARRAY_SIZE(smb135x_battery_properties);
+	if (!chip->bms_psy_name)
+		chip->batt_psy.num_properties--;
 	chip->batt_psy.external_power_changed = smb135x_external_power_changed;
 	chip->batt_psy.property_is_writeable = smb135x_battery_is_writeable;
 

@@ -847,6 +847,7 @@
 		therm-bias-supply = <&pma8084_lvs2>;
 		qcom,thermal-mitigation = <0x5dc 0x2bc 0x258 0x00>;
 		qcom,smb1358-vadc = <&pma8084_vadc>;
+		qcom,bms-psy-name = "bms";
 	};
 };
 

@@ -48,6 +48,9 @@ Optional Properties:
 - qcom,thermal-mitigation:		Array of input current limit values for different
 					system thermal mitigation level.
 - regulator-name			A string used as a descriptive name for OTG regulator.
+- qcom,bms-psy-name		Name of the battery monitor power supply providing
+				capacity and voltage. When set, measurement errors are
+				returned to the caller instead of a default capacity.
 - therm-bias-supply			The supply that provides bias voltage to the battery
 					thermistor. This is useful in designs that do not use the SYSON
 					pin to bias the thermistor.
