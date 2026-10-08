@@ -27,6 +27,7 @@
 #include <linux/regulator/driver.h>
 #include <linux/regulator/of_regulator.h>
 #include <linux/regulator/machine.h>
+#include <linux/qpnp/qpnp-adc.h>
 
 #define SMB135X_BITS_PER_REG	8
 
@@ -336,6 +337,9 @@ struct smb135x_chg {
 	bool				soft_vfloat_comp_disabled;
 	struct mutex			irq_complete;
 	struct regulator		*therm_bias_vreg;
+#ifdef CONFIG_MACH_APQ8084_EF67
+	struct qpnp_vadc_chip		*vadc;
+#endif
 	struct delayed_work		wireless_insertion_work;
 
 	unsigned int			thermal_levels;
@@ -547,6 +551,9 @@ static enum power_supply_type get_usb_supply_type(u8 stat_5)
 }
 
 static enum power_supply_property smb135x_battery_properties[] = {
+#ifdef CONFIG_MACH_APQ8084_EF67
+	POWER_SUPPLY_PROP_TEMP,
+#endif
 	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_PRESENT,
 	POWER_SUPPLY_PROP_CHARGING_ENABLED,
@@ -661,6 +668,22 @@ static int smb135x_get_prop_batt_capacity(struct smb135x_chg *chip,
 	val->intval = DEFAULT_BATT_CAPACITY;
 	return 0;
 }
+
+#ifdef CONFIG_MACH_APQ8084_EF67
+static int smb135x_get_prop_batt_temp(struct smb135x_chg *chip,
+				    union power_supply_propval *val)
+{
+	struct qpnp_vadc_result result;
+	int rc;
+
+	rc = qpnp_vadc_read(chip->vadc, P_MUX5_1_1, &result);
+	if (rc)
+		return rc;
+
+	val->intval = result.physical;
+	return 0;
+}
+#endif
 
 static int smb135x_get_prop_batt_health(struct smb135x_chg *chip)
 {
@@ -1306,6 +1329,10 @@ static int smb135x_battery_get_property(struct power_supply *psy,
 		return smb135x_get_prop_batt_capacity(chip, val);
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
 		return smb135x_get_bms_property(chip, prop, val);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	case POWER_SUPPLY_PROP_TEMP:
+		return smb135x_get_prop_batt_temp(chip, val);
+#endif
 	case POWER_SUPPLY_PROP_HEALTH:
 		val->intval = smb135x_get_prop_batt_health(chip);
 		break;
@@ -3075,6 +3102,12 @@ static int smb135x_charger_probe(struct i2c_client *client,
 		dev_err(&client->dev, "Unable to parse DT nodes\n");
 		return rc;
 	}
+
+#ifdef CONFIG_MACH_APQ8084_EF67
+	chip->vadc = qpnp_get_vadc(chip->dev, "smb1358");
+	if (IS_ERR(chip->vadc))
+		return PTR_ERR(chip->vadc);
+#endif
 
 	i2c_set_clientdata(client, chip);
 
