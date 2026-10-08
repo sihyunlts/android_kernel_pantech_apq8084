@@ -522,9 +522,8 @@ static int ef67_mxt_update_scanning(struct ef67_mxt *touch)
 			touch->asleep = true;
 		return ret;
 	}
-	if (!touch->configured || touch->controller_fault)
-		return -EIO;
-	if (touch->asleep) {
+	if (touch->asleep || !touch->configured ||
+	    ACCESS_ONCE(touch->controller_fault)) {
 		ret = ef67_mxt_wake(touch);
 	} else {
 		ret = ef67_mxt_write(touch, touch->power_address, 2, run);
