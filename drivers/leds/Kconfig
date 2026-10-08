@@ -222,6 +222,14 @@ config LEDS_LP5523
 	  Driver provides direct control via LED class and interface for
 	  programming the engines.
 
+config LEDS_LP5523_EF67
+	tristate "Pantech EF67 LP5523 notification and touchkey LEDs"
+	depends on MACH_APQ8084_EF67 && LEDS_CLASS && I2C && OF && GPIOLIB
+	help
+	  Support the EF67 stock device tree and LED interface, including
+	  RGB patterns and the channel8 command endpoint. Timing channels
+	  are parameters rather than physical LED outputs.
+
 config LEDS_LP5562
 	tristate "LED Support for TI LP5562 LED driver chip"
 	depends on LEDS_CLASS && I2C
