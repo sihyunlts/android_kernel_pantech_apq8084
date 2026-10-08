@@ -23,6 +23,7 @@
 #include <linux/err.h>
 
 #include "mdss_dsi.h"
+#include "mdss_dsi_panel_ef67.h"
 
 #define DT_CMD_HDR 6
 
@@ -116,7 +117,7 @@ u32 mdss_dsi_panel_cmd_read(struct mdss_dsi_ctrl_pdata *ctrl, char cmd0,
 	return 0;
 }
 
-static void mdss_dsi_panel_cmds_send(struct mdss_dsi_ctrl_pdata *ctrl,
+static int mdss_dsi_panel_cmds_send(struct mdss_dsi_ctrl_pdata *ctrl,
 			struct dsi_panel_cmds *pcmds)
 {
 	struct dcs_cmd_req cmdreq;
@@ -125,7 +126,7 @@ static void mdss_dsi_panel_cmds_send(struct mdss_dsi_ctrl_pdata *ctrl,
 	pinfo = &(ctrl->panel_data.panel_info);
 	if (pinfo->partial_update_dcs_cmd_by_left) {
 		if (ctrl->ndx != DSI_CTRL_LEFT)
-			return;
+			return 0;
 	}
 
 	memset(&cmdreq, 0, sizeof(cmdreq));
@@ -140,7 +141,7 @@ static void mdss_dsi_panel_cmds_send(struct mdss_dsi_ctrl_pdata *ctrl,
 	cmdreq.rlen = 0;
 	cmdreq.cb = NULL;
 
-	mdss_dsi_cmdlist_put(ctrl, &cmdreq);
+	return mdss_dsi_cmdlist_put(ctrl, &cmdreq);
 }
 
 static char led_pwm1[2] = {0x51, 0x0};	/* DTYPE_DCS_WRITE1 */
@@ -237,6 +238,8 @@ int mdss_dsi_panel_reset(struct mdss_panel_data *pdata, int enable)
 
 	ctrl_pdata = container_of(pdata, struct mdss_dsi_ctrl_pdata,
 				panel_data);
+	if (ctrl_pdata->ef67_panel)
+		return mdss_dsi_ef67_reset(ctrl_pdata, enable);
 
 	if (!gpio_is_valid(ctrl_pdata->disp_en_gpio)) {
 		pr_debug("%s:%d, reset line not configured\n",
@@ -458,6 +461,10 @@ static void mdss_dsi_panel_bl_ctrl(struct mdss_panel_data *pdata,
 
 	if ((bl_level < pdata->panel_info.bl_min) && (bl_level != 0))
 		bl_level = pdata->panel_info.bl_min;
+	if (ctrl_pdata->ef67_panel) {
+		mdss_dsi_ef67_backlight(ctrl_pdata, bl_level);
+		return;
+	}
 
 	switch (ctrl_pdata->bklt_ctrl) {
 	case BL_WLED:
@@ -491,6 +498,7 @@ static int mdss_dsi_panel_on(struct mdss_panel_data *pdata)
 	struct mipi_panel_info *mipi;
 	struct mdss_dsi_ctrl_pdata *ctrl = NULL;
 	struct mdss_panel_info *pinfo;
+	int rc;
 
 	if (pdata == NULL) {
 		pr_err("%s: Invalid input data\n", __func__);
@@ -502,6 +510,8 @@ static int mdss_dsi_panel_on(struct mdss_panel_data *pdata)
 	ctrl = container_of(pdata, struct mdss_dsi_ctrl_pdata,
 				panel_data);
 	mipi  = &pdata->panel_info.mipi;
+	if (ctrl->ef67_panel && pinfo->pdest != DISPLAY_1)
+		return 0;
 
 	if (pinfo->partial_update_dcs_cmd_by_left) {
 		if (ctrl->ndx != DSI_CTRL_LEFT)
@@ -511,8 +521,13 @@ static int mdss_dsi_panel_on(struct mdss_panel_data *pdata)
 	pr_debug("%s: ctrl=%p ndx=%d\n", __func__, ctrl, ctrl->ndx);
 
 
-	if (ctrl->on_cmds.cmd_cnt)
-		mdss_dsi_panel_cmds_send(ctrl, &ctrl->on_cmds);
+	if (ctrl->on_cmds.cmd_cnt) {
+		rc = mdss_dsi_panel_cmds_send(ctrl, &ctrl->on_cmds);
+		if (ctrl->ef67_panel && rc)
+			return rc;
+	}
+	if (ctrl->ef67_panel)
+		mdss_dsi_ef67_panel_on(ctrl);
 
 	pr_debug("%s:-\n", __func__);
 	return 0;
@@ -523,6 +538,7 @@ static int mdss_dsi_panel_off(struct mdss_panel_data *pdata)
 	struct mipi_panel_info *mipi;
 	struct mdss_dsi_ctrl_pdata *ctrl = NULL;
 	struct mdss_panel_info *pinfo;
+	int rc;
 
 	if (pdata == NULL) {
 		pr_err("%s: Invalid input data\n", __func__);
@@ -533,6 +549,8 @@ static int mdss_dsi_panel_off(struct mdss_panel_data *pdata)
 
 	ctrl = container_of(pdata, struct mdss_dsi_ctrl_pdata,
 				panel_data);
+	if (ctrl->ef67_panel && pinfo->pdest != DISPLAY_1)
+		return 0;
 
 	if (pinfo->partial_update_dcs_cmd_by_left) {
 		if (ctrl->ndx != DSI_CTRL_LEFT)
@@ -543,8 +561,11 @@ static int mdss_dsi_panel_off(struct mdss_panel_data *pdata)
 
 	mipi  = &pdata->panel_info.mipi;
 
-	if (ctrl->off_cmds.cmd_cnt)
-		mdss_dsi_panel_cmds_send(ctrl, &ctrl->off_cmds);
+	if (ctrl->off_cmds.cmd_cnt) {
+		rc = mdss_dsi_panel_cmds_send(ctrl, &ctrl->off_cmds);
+		if (ctrl->ef67_panel && rc)
+			return rc;
+	}
 
 	pr_debug("%s:-\n", __func__);
 	return 0;

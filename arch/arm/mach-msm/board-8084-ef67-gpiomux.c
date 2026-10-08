@@ -489,14 +489,12 @@ static struct msm_gpiomux_config ef67_modem_configs[] __initdata = {
 	},
 };
 
+/*
+ * GPIO26/96/97 belong to the panel power sequence. Do not install gpiomux
+ * settings for them: request/free would otherwise raise BL/reset/VDDIO
+ * outside that sequence. Keep bootloader levels until the panel takes over.
+ */
 static struct msm_gpiomux_config ef67_display_configs[] __initdata = {
-	{
-		.gpio = 96,
-		.settings = {
-			[GPIOMUX_ACTIVE] = &gpio_out_high_8ma_no_pull,
-			[GPIOMUX_SUSPENDED] = &gpio_out_high_2ma_pull_down,
-		},
-	},
 	{
 		.gpio = 86,
 		.settings = {
@@ -511,22 +509,6 @@ static struct msm_gpiomux_config ef67_display_power_configs[] __initdata = {
 		.settings = {
 			[GPIOMUX_ACTIVE] = &gpio_out_high_2ma_no_pull,
 			[GPIOMUX_SUSPENDED] = &gpio_out_high_2ma_pull_down,
-		},
-	},
-	{
-		.gpio = 97,
-		.settings = {
-			[GPIOMUX_ACTIVE] = &gpio_out_high_2ma_no_pull,
-			[GPIOMUX_SUSPENDED] = &gpio_out_high_2ma_pull_down,
-		},
-	},
-};
-
-static struct msm_gpiomux_config ef67_backlight_configs[] __initdata = {
-	{
-		.gpio = 26,
-		.settings = {
-			[GPIOMUX_ACTIVE] = &gpio_out_high_2ma_no_pull,
 		},
 	},
 };
@@ -832,8 +814,6 @@ void __init apq8084_init_gpiomux(void)
 			ARRAY_SIZE(ef67_display_configs));
 	msm_gpiomux_install(ef67_display_power_configs,
 			ARRAY_SIZE(ef67_display_power_configs));
-	msm_gpiomux_install(ef67_backlight_configs,
-			ARRAY_SIZE(ef67_backlight_configs));
 	msm_gpiomux_install(ef67_auxpcm_configs,
 			ARRAY_SIZE(ef67_auxpcm_configs));
 	msm_gpiomux_install(ef67_hsic_configs,

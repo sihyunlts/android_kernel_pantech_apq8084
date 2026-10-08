@@ -22,6 +22,7 @@ obj-$(CONFIG_FB_MSM_MDSS_MDP3) += dsi-v2.o
 
 mdss-dsi-objs := mdss_dsi.o mdss_dsi_host.o mdss_dsi_cmd.o
 mdss-dsi-objs += mdss_dsi_panel.o
+mdss-dsi-$(CONFIG_MACH_APQ8084_EF67) += mdss_dsi_panel_ef67.o
 mdss-dsi-objs += msm_mdss_io_8974.o
 obj-$(CONFIG_FB_MSM_MDSS) += mdss-dsi.o
 obj-$(CONFIG_FB_MSM_MDSS_EDP_PANEL) += mdss_edp.o

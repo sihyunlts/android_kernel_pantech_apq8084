@@ -1,0 +1,42 @@
+Pantech EF67 R63419 dual-DSI panel
+
+With CONFIG_MACH_APQ8084_EF67, the qcom,mdss-vcip-en-gpio property selects
+the EF67 power and backlight implementation. The standard MDSS panel
+properties are described in mdss-dsi-panel.txt.
+
+Both panel nodes describe the same physical panel and use the following
+GPIO properties instead of the controller's qcom,platform-* GPIO properties:
+
+- qcom,mdss-reset-gpio: panel reset, GPIO96, high releases reset.
+- qcom,mdss-bl-en-gpio: backlight enable, GPIO26, active high.
+- qcom,mdss-vddio-reg-gpio: VDDIO enable, GPIO97, active high.
+- qcom,mdss-vcip-en-gpio: positive bias enable, GPIO136, active high.
+- qcom,mdss-vcin-en-gpio: negative bias enable, GPIO137, active high.
+- qcom,mdss-te-gpio: tearing-effect input, GPIO12.
+
+GPIO flags are zero, matching the stock EF67 device tree. DISPLAY_1 owns
+the shared pins; DISPLAY_2 must not request or reset them again. Panel
+initialization, shutdown and backlight DCS commands use DISPLAY_1 only,
+matching the stock panel. Both controllers carry pixel data.
+qcom,mdss-dsi-bl-pmic-control-type must be "bl_ctrl_dcs" and
+qcom,mdss-dsi-bl-max-level must be 255.
+
+The stock on/off command sets are required. In particular, the off commands
+use "dsi_hs_mode": MDSS sends BLANK before PANEL_OFF
+removes shared power. The on commands restore dimming (0x53=0x0c) and
+CABC (0x55=0x03). There is no separate runtime CABC interface.
+
+qcom,cont-splash-enabled retains bootloader output levels when continuous
+splash is enabled by the MDSS boot configuration. The EF67 power sequence
+replaces qcom,mdss-dsi-reset-sequence for this panel.
+
+The board must not install gpiomux active/suspended output levels for these
+power/reset/backlight pins: GPIO request/free can apply those levels outside
+the panel power sequence. The panel driver configures GPIO26/96/97 when
+taking over the outputs; bias-enable pin settings remain as in the bootloader.
+
+The verified supply configuration is IM-A930S S0226114: vdda uses PMA8084 L2
+at 1200000 uV and vddio uses PMA8084 L12 at 1800000 uV, without a separate
+DSI vdd supply. VCIP/VCIN GPIO values only control enables, not bias voltage
+magnitudes. The older IM-A930L firmware has a different supply configuration;
+using the same DT in an L build does not establish electrical compatibility.

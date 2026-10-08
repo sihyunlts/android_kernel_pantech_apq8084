@@ -1,0 +1,31 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+#ifndef MDSS_DSI_PANEL_EF67_H
+#define MDSS_DSI_PANEL_EF67_H
+
+#ifdef CONFIG_MACH_APQ8084_EF67
+int mdss_dsi_ef67_init(struct device *dev, struct device_node *node,
+		struct mdss_dsi_ctrl_pdata *ctrl);
+int mdss_dsi_ef67_reset(struct mdss_dsi_ctrl_pdata *ctrl, int enable);
+void mdss_dsi_ef67_backlight(struct mdss_dsi_ctrl_pdata *ctrl, u32 level);
+void mdss_dsi_ef67_panel_on(struct mdss_dsi_ctrl_pdata *ctrl);
+#else
+static inline int mdss_dsi_ef67_init(struct device *dev,
+		struct device_node *node, struct mdss_dsi_ctrl_pdata *ctrl)
+{
+	return 0;
+}
+static inline int mdss_dsi_ef67_reset(struct mdss_dsi_ctrl_pdata *ctrl,
+		int enable)
+{
+	return 0;
+}
+static inline void mdss_dsi_ef67_backlight(struct mdss_dsi_ctrl_pdata *ctrl,
+		u32 level)
+{
+}
+static inline void mdss_dsi_ef67_panel_on(struct mdss_dsi_ctrl_pdata *ctrl)
+{
+}
+#endif
+
+#endif

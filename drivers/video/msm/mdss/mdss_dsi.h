@@ -279,6 +279,7 @@ struct mdss_dsi_ctrl_pdata {
 	int bklt_en_gpio;
 	int mode_gpio;
 	int disp_te_gpio_requested;
+	struct mdss_dsi_ef67_panel *ef67_panel;
 	int bklt_ctrl;	/* backlight ctrl */
 	int pwm_period;
 	int pwm_pmic_gpio;

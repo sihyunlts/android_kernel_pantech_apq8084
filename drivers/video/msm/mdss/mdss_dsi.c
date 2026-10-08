@@ -25,6 +25,7 @@
 #include "mdss.h"
 #include "mdss_panel.h"
 #include "mdss_dsi.h"
+#include "mdss_dsi_panel_ef67.h"
 #include "mdss_debug.h"
 
 static int mdss_dsi_regulator_init(struct platform_device *pdev)
@@ -132,11 +133,17 @@ static int mdss_dsi_panel_power_on(struct mdss_panel_data *pdata, int enable)
 	}
 
 error_enable:
-	if (ret) {
-		for (; i >= 0; i--)
+	if (ret && enable) {
+		/* Lower external EF67 rails before dropping their PMIC supplies. */
+		if (ctrl_pdata->ef67_panel)
+			mdss_dsi_ef67_reset(ctrl_pdata, 0);
+		while (--i >= 0) {
+			if (DSI_CORE_PM == i)
+				continue;
 			msm_dss_enable_vreg(
 				ctrl_pdata->power_data[i].vreg_config,
 				ctrl_pdata->power_data[i].num_vreg, 0);
+		}
 	}
 
 error:
@@ -687,18 +694,11 @@ int mdss_dsi_on(struct mdss_panel_data *pdata)
 		return ret;
 	}
 
-	mdss_dsi_clk_ctrl(ctrl_pdata, DSI_BUS_CLKS, 1);
+	ret = mdss_dsi_clk_ctrl(ctrl_pdata, DSI_BUS_CLKS, 1);
 	if (ret) {
 		pr_err("%s: failed to enable bus clocks. rc=%d\n", __func__,
 			ret);
-		ret = mdss_dsi_panel_power_on(pdata, 0);
-		if (ret) {
-			pr_err("%s: Panel reset failed. rc=%d\n",
-					__func__, ret);
-			return ret;
-		}
-		pdata->panel_info.panel_power_on = 0;
-		return ret;
+		goto error_power;
 	}
 	pdata->panel_info.panel_power_on = 1;
 
@@ -706,7 +706,9 @@ int mdss_dsi_on(struct mdss_panel_data *pdata)
 	mdss_dsi_phy_init(pdata);
 	mdss_dsi_clk_ctrl(ctrl_pdata, DSI_BUS_CLKS, 0);
 
-	mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 1);
+	ret = mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 1);
+	if (ret)
+		goto error_power;
 
 	__mdss_dsi_ctrl_setup(pdata);
 	mdss_dsi_sw_reset(pdata);
@@ -716,8 +718,11 @@ int mdss_dsi_on(struct mdss_panel_data *pdata)
 	 * Issue hardware reset line after enabling the DSI clocks and data
 	 * data lanes for LP11 init
 	 */
-	if (mipi->lp11_init)
-		mdss_dsi_panel_reset(pdata, 1);
+	if (mipi->lp11_init) {
+		ret = mdss_dsi_panel_reset(pdata, 1);
+		if (ret)
+			goto error_clocks;
+	}
 
 	if (mipi->init_delay)
 		usleep(mipi->init_delay);
@@ -736,6 +741,14 @@ int mdss_dsi_on(struct mdss_panel_data *pdata)
 
 	pr_debug("%s-:\n", __func__);
 	return 0;
+
+error_clocks:
+	pdata->panel_info.panel_power_on = 0;
+	mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 0);
+error_power:
+	pdata->panel_info.panel_power_on = 0;
+	mdss_dsi_panel_power_on(pdata, 0);
+	return ret;
 }
 
 static int mdss_dsi_unblank(struct mdss_panel_data *pdata)
@@ -755,7 +768,9 @@ static int mdss_dsi_unblank(struct mdss_panel_data *pdata)
 				panel_data);
 	mipi  = &pdata->panel_info.mipi;
 
-	mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 1);
+	ret = mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 1);
+	if (ret)
+		return ret;
 
 	if (!(ctrl_pdata->ctrl_state & CTRL_STATE_PANEL_INIT)) {
 		ret = ctrl_pdata->on(pdata);
@@ -1040,6 +1055,8 @@ static int mdss_dsi_event_handler(struct mdss_panel_data *pdata,
 	switch (event) {
 	case MDSS_EVENT_UNBLANK:
 		rc = mdss_dsi_on(pdata);
+		if (rc)
+			break;
 		mdss_dsi_op_mode_config(pdata->panel_info.mipi.mode,
 							pdata);
 		if (ctrl_pdata->on_cmds.link_state == DSI_LP_MODE)
@@ -1311,10 +1328,18 @@ static int mdss_dsi_ctrl_probe(struct platform_device *pdev)
 error_pan_node:
 	of_node_put(dsi_pan_node);
 error_vreg:
-	for (; i >= 0; i--)
+	for (i = DSI_MAX_PM - 1; i >= 0; i--) {
+		msm_dss_config_vreg(&pdev->dev,
+			ctrl_pdata->power_data[i].vreg_config,
+			ctrl_pdata->power_data[i].num_vreg, 0);
 		mdss_dsi_put_dt_vreg_data(&pdev->dev,
 			&ctrl_pdata->power_data[i]);
+	}
 error_no_mem:
+	if (ctrl_pdata && ctrl_pdata->ef67_panel &&
+			ctrl_list[ctrl_pdata->ndx] == ctrl_pdata)
+		ctrl_list[ctrl_pdata->ndx] = NULL;
+	platform_set_drvdata(pdev, NULL);
 	devm_kfree(&pdev->dev, ctrl_pdata);
 
 	return rc;
@@ -1322,7 +1347,6 @@ error_no_mem:
 
 static int mdss_dsi_ctrl_remove(struct platform_device *pdev)
 {
-	struct msm_fb_data_type *mfd;
 	struct mdss_dsi_ctrl_pdata *ctrl_pdata = platform_get_drvdata(pdev);
 	int i = 0;
 
@@ -1330,18 +1354,25 @@ static int mdss_dsi_ctrl_remove(struct platform_device *pdev)
 		pr_err("%s: no driver data\n", __func__);
 		return -ENODEV;
 	}
+	if (ctrl_pdata->ef67_panel) {
+		if (ctrl_pdata->panel_data.panel_info.panel_power_on)
+			mdss_dsi_off(&ctrl_pdata->panel_data);
+		else
+			mdss_dsi_ef67_reset(ctrl_pdata, 0);
+		if (ctrl_list[ctrl_pdata->ndx] == ctrl_pdata)
+			ctrl_list[ctrl_pdata->ndx] = NULL;
+	}
 
 	for (i = DSI_MAX_PM - 1; i >= 0; i--) {
 		if (msm_dss_config_vreg(&pdev->dev,
 				ctrl_pdata->power_data[i].vreg_config,
-				ctrl_pdata->power_data[i].num_vreg, 1) < 0)
+				ctrl_pdata->power_data[i].num_vreg, 0) < 0)
 			pr_err("%s: failed to de-init vregs for %s\n",
 				__func__, __mdss_dsi_pm_name(i));
 		mdss_dsi_put_dt_vreg_data(&pdev->dev,
 			&ctrl_pdata->power_data[i]);
 	}
 
-	mfd = platform_get_drvdata(pdev);
 	msm_dss_iounmap(&ctrl_pdata->mmss_misc_io);
 	msm_dss_iounmap(&ctrl_pdata->phy_io);
 	msm_dss_iounmap(&ctrl_pdata->ctrl_io);
@@ -1543,6 +1574,12 @@ int dsi_panel_device_register(struct device_node *pan_node,
 		pinfo->new_fps = pinfo->mipi.frame_rate;
 	}
 
+	rc = mdss_dsi_ef67_init(&ctrl_pdev->dev, pan_node, ctrl_pdata);
+	if (rc)
+		return rc;
+	if (ctrl_pdata->ef67_panel)
+		goto panel_gpios_ready;
+
 	ctrl_pdata->disp_en_gpio = of_get_named_gpio(ctrl_pdev->dev.of_node,
 		"qcom,platform-enable-gpio", 0);
 
@@ -1614,6 +1651,7 @@ int dsi_panel_device_register(struct device_node *pan_node,
 		ctrl_pdata->mode_gpio = -EINVAL;
 	}
 
+panel_gpios_ready:
 	if (mdss_dsi_clk_init(ctrl_pdev, ctrl_pdata)) {
 		pr_err("%s: unable to initialize Dsi ctrl clks\n", __func__);
 		return -EPERM;
@@ -1649,10 +1687,13 @@ int dsi_panel_device_register(struct device_node *pan_node,
 		rc = mdss_dsi_panel_power_on(&(ctrl_pdata->panel_data), 1);
 		if (rc) {
 			pr_err("%s: Panel power on failed\n", __func__);
+			pinfo->panel_power_on = 0;
 			return rc;
 		}
 
-		mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 1);
+		rc = mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 1);
+		if (rc)
+			goto error_splash_power;
 		ctrl_pdata->ctrl_state |=
 			(CTRL_STATE_PANEL_INIT | CTRL_STATE_MDP_ACTIVE);
 	} else {
@@ -1662,6 +1703,11 @@ int dsi_panel_device_register(struct device_node *pan_node,
 	rc = mdss_register_panel(ctrl_pdev, &(ctrl_pdata->panel_data));
 	if (rc) {
 		pr_err("%s: unable to register MIPI DSI panel\n", __func__);
+		if (pinfo->cont_splash_enabled) {
+			pinfo->panel_power_on = 0;
+			mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 0);
+			goto error_splash_power;
+		}
 		return rc;
 	}
 
@@ -1677,6 +1723,11 @@ int dsi_panel_device_register(struct device_node *pan_node,
 
 	pr_debug("%s: Panel data initialized\n", __func__);
 	return 0;
+
+error_splash_power:
+	pinfo->panel_power_on = 0;
+	mdss_dsi_panel_power_on(&ctrl_pdata->panel_data, 0);
+	return rc;
 }
 
 static const struct of_device_id mdss_dsi_ctrl_dt_match[] = {
