@@ -32,6 +32,7 @@
 #include <linux/alarmtimer.h>
 #include <linux/pm_wakeup.h>
 #include <linux/workqueue.h>
+#include <mach/gpiomux.h>
 #endif
 
 #define SMB135X_BITS_PER_REG	8
@@ -292,6 +293,22 @@ struct smb135x_regulator {
 #define EF67_FASTCHG_MASK 0x1f
 #define EF67_FASTCHG_1200MA 0x0d
 #define EF67_FASTCHG_2000MA 0x19
+#define EF67_OVP_GPIO 85
+#define EF67_OVP_RESET_MS 150
+
+static struct gpiomux_setting ef67_ovp_setting = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_DOWN,
+	.dir = GPIOMUX_OUT_LOW,
+};
+
+static struct msm_gpiomux_config ef67_ovp_config = {
+	.gpio = EF67_OVP_GPIO,
+	.settings = {
+		[GPIOMUX_ACTIVE] = &ef67_ovp_setting,
+	},
+};
 
 enum ef67_temp_state {
 	EF67_TEMP_COLD,
@@ -1299,6 +1316,39 @@ static int __smb135x_charging(struct smb135x_chg *chip, int enable)
 }
 
 #ifdef CONFIG_MACH_APQ8084_EF67
+/* Called with current_change_lock held and thermal_wake active. */
+static int ef67_recover_input(struct smb135x_chg *chip)
+{
+	u8 reg;
+	int rc;
+
+	if (!chip->usb_present)
+		return 0;
+	rc = smb135x_read(chip, CMD_CHG_REG, &reg);
+	if (rc)
+		return rc;
+	if (reg & OTG_EN)
+		return 0;
+	rc = smb135x_read(chip, STATUS_1_REG, &reg);
+	if (rc)
+		return rc;
+	if (!(reg & BIT(3))) {
+		if (chip->usb_psy->type == POWER_SUPPLY_TYPE_USB)
+			return 0;
+		rc = smb135x_read(chip, 0x46, &reg);
+		if (rc)
+			return rc;
+		if (reg & BIT(7))
+			return 0;
+	}
+
+	/* Keep the reset and restore in one operation across PM transitions. */
+	gpio_set_value(EF67_OVP_GPIO, 1);
+	msleep(EF67_OVP_RESET_MS);
+	gpio_set_value(EF67_OVP_GPIO, 0);
+	return 0;
+}
+
 /* Called with current_change_lock held. */
 static int ef67_update_thermal(struct smb135x_chg *chip)
 {
@@ -1400,10 +1450,13 @@ static void ef67_thermal_work(struct work_struct *work)
 
 	__pm_stay_awake(&chip->thermal_wake);
 	mutex_lock(&chip->current_change_lock);
-	if (!chip->thermal_running)
+	if (!chip->thermal_running || !chip->resume_completed)
 		goto out;
 	was_enabled = chip->chg_enabled;
 	last_temp = chip->last_temp_decic;
+	rc = ef67_recover_input(chip);
+	if (rc)
+		dev_err(chip->dev, "Couldn't check input recovery rc=%d\n", rc);
 	rc = ef67_update_thermal(chip);
 	if (rc)
 		dev_err(chip->dev, "Battery thermal check failed rc=%d\n", rc);
@@ -1775,10 +1828,9 @@ static bool elapsed_msec_greater(struct timeval *start_time,
 }
 
 #define MAX_STEP_MS		10
-static int smb135x_chg_otg_regulator_enable(struct regulator_dev *rdev)
+static int __smb135x_chg_otg_regulator_enable(struct smb135x_chg *chip)
 {
 	int rc = 0;
-	struct smb135x_chg *chip = rdev_get_drvdata(rdev);
 	int restart_count = 0;
 	struct timeval time_a, time_b, time_c, time_d;
 
@@ -1852,6 +1904,25 @@ restart_from_disable:
 		pr_debug("restarting from disable\n");
 		goto restart_from_disable;
 	}
+	return rc;
+}
+
+static int smb135x_chg_otg_regulator_enable(struct regulator_dev *rdev)
+{
+	struct smb135x_chg *chip = rdev_get_drvdata(rdev);
+	int rc;
+
+#ifdef CONFIG_MACH_APQ8084_EF67
+	mutex_lock(&chip->current_change_lock);
+	if (!chip->resume_completed) {
+		mutex_unlock(&chip->current_change_lock);
+		return -EBUSY;
+	}
+#endif
+	rc = __smb135x_chg_otg_regulator_enable(chip);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	mutex_unlock(&chip->current_change_lock);
+#endif
 	return rc;
 }
 
@@ -3491,6 +3562,11 @@ static int smb135x_charger_probe(struct i2c_client *client,
 		return PTR_ERR(chip->vadc);
 	if (!alarmtimer_get_rtcdev())
 		return -EPROBE_DEFER;
+	msm_gpiomux_install(&ef67_ovp_config, 1);
+	rc = devm_gpio_request_one(chip->dev, EF67_OVP_GPIO,
+				   GPIOF_OUT_INIT_LOW, "ef67-ovp");
+	if (rc)
+		return rc;
 #endif
 
 	i2c_set_clientdata(client, chip);
