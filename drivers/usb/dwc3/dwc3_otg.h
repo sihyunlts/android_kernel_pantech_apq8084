@@ -44,6 +44,7 @@ struct dwc3_otg {
 #ifdef CONFIG_MACH_APQ8084_EF67
 	struct notifier_block	vbus_notifier;
 	bool			vbus_fault;
+	bool			vbus_cleanup_pending;
 #endif
 	struct delayed_work	sm_work;
 	struct dwc3_charger	*charger;

@@ -33,7 +33,6 @@ MODULE_PARM_DESC(max_chgr_retry_count, "Max invalid charger retry count");
 static void dwc3_otg_reset(struct dwc3_otg *dotg);
 static int dwc3_otg_set_host(struct usb_otg *otg, struct usb_bus *host);
 static void dwc3_otg_notify_host_mode(struct usb_otg *otg, int host_mode);
-static void dwc3_otg_reset(struct dwc3_otg *dotg);
 
 /**
  * dwc3_otg_set_host_regs - reset dwc3 otg registers to host operation.
@@ -161,6 +160,48 @@ static int dwc3_otg_vbus_event(struct notifier_block *nb,
 }
 #endif
 
+static int dwc3_otg_stop_host(struct dwc3_otg *dotg, bool remove_host)
+{
+	struct dwc3 *dwc = dotg->dwc;
+	struct dwc3_ext_xceiv *ext_xceiv = dotg->ext_xceiv;
+	int ret;
+
+	ret = regulator_disable(dotg->vbus_otg);
+	if (ret) {
+		dev_err(dotg->otg.phy->dev, "unable to disable vbus_otg\n");
+		return ret;
+	}
+
+	pm_runtime_get(dwc->dev);
+	dwc3_otg_notify_host_mode(&dotg->otg, 0);
+	if (remove_host) {
+		dwc3_otg_set_host(&dotg->otg, NULL);
+		platform_device_del(dwc->xhci);
+	}
+
+	/*
+	 * Perform USB hardware RESET (both core reset and DBM reset)
+	 * when moving from host to peripheral. This is required for
+	 * peripheral mode to work.
+	 */
+	if (ext_xceiv && ext_xceiv->otg_capability &&
+			ext_xceiv->ext_block_reset)
+		ext_xceiv->ext_block_reset(ext_xceiv, true);
+
+	dwc3_otg_set_hsphy_auto_suspend(dotg, false);
+	dwc3_otg_set_peripheral_regs(dotg);
+
+	/* re-init core and OTG registers as block reset clears these */
+	dwc3_post_host_reset_core_init(dwc);
+	if (ext_xceiv && !ext_xceiv->otg_capability)
+		dwc3_otg_reset(dotg);
+	pm_runtime_put(dwc->dev);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	dotg->vbus_cleanup_pending = false;
+#endif
+	return 0;
+}
+
 /**
  * dwc3_otg_start_host - start or stop the host controller driver
  * @otg: USB OTG transceiver
@@ -200,6 +241,10 @@ static int dwc3_otg_start_host(struct usb_otg *otg, int on)
 	}
 
 	if (on) {
+#ifdef CONFIG_MACH_APQ8084_EF67
+		if (dotg->vbus_cleanup_pending)
+			return -EBUSY;
+#endif
 		dev_dbg(otg->phy->dev, "%s: turn on host\n", __func__);
 
 		dwc3_otg_notify_host_mode(otg, on);
@@ -235,8 +280,15 @@ static int dwc3_otg_start_host(struct usb_otg *otg, int on)
 			dev_err(otg->phy->dev,
 				"%s: failed to add XHCI pdev ret=%d\n",
 				__func__, ret);
+#ifdef CONFIG_MACH_APQ8084_EF67
+			/* No xHCI device exists until platform_device_add succeeds. */
+			dotg->vbus_cleanup_pending = true;
+			if (dwc3_otg_stop_host(dotg, false))
+				ACCESS_ONCE(dotg->vbus_fault) = true;
+#else
 			regulator_disable(dotg->vbus_otg);
 			dwc3_otg_notify_host_mode(otg, 0);
+#endif
 			return ret;
 		}
 
@@ -249,34 +301,11 @@ static int dwc3_otg_start_host(struct usb_otg *otg, int on)
 	} else {
 		dev_dbg(otg->phy->dev, "%s: turn off host\n", __func__);
 
-		ret = regulator_disable(dotg->vbus_otg);
-		if (ret) {
-			dev_err(otg->phy->dev, "unable to disable vbus_otg\n");
-			return ret;
-		}
-
-		pm_runtime_get(dwc->dev);
-		dwc3_otg_notify_host_mode(otg, on);
-		dwc3_otg_set_host(otg, NULL);
-		platform_device_del(dwc->xhci);
-
-		/*
-		 * Perform USB hardware RESET (both core reset and DBM reset)
-		 * when moving from host to peripheral. This is required for
-		 * peripheral mode to work.
-		 */
-		if (ext_xceiv && ext_xceiv->otg_capability &&
-						ext_xceiv->ext_block_reset)
-			ext_xceiv->ext_block_reset(ext_xceiv, true);
-
-		dwc3_otg_set_hsphy_auto_suspend(dotg, false);
-		dwc3_otg_set_peripheral_regs(dotg);
-
-		/* re-init core and OTG registers as block reset clears these */
-		dwc3_post_host_reset_core_init(dwc);
-		if (ext_xceiv && !ext_xceiv->otg_capability)
-			dwc3_otg_reset(dotg);
-		pm_runtime_put(dwc->dev);
+#ifdef CONFIG_MACH_APQ8084_EF67
+		return dwc3_otg_stop_host(dotg, !dotg->vbus_cleanup_pending);
+#else
+		return dwc3_otg_stop_host(dotg, true);
+#endif
 	}
 
 	return 0;
@@ -716,6 +745,12 @@ static void dwc3_otg_sm_work(struct work_struct *w)
 	pm_runtime_resume(phy->dev);
 	dev_dbg(phy->dev, "%s state\n", usb_otg_state_string(phy->state));
 #ifdef CONFIG_MACH_APQ8084_EF67
+	/* Finish failed-start cleanup before handling detach or another start. */
+	if (dotg->vbus_cleanup_pending && dwc3_otg_start_host(&dotg->otg, 0)) {
+		queue_delayed_work(system_nrt_wq, &dotg->sm_work,
+				   VBUS_REG_CHECK_DELAY);
+		return;
+	}
 	if (test_bit(ID, &dotg->inputs) && phy->state != OTG_STATE_A_HOST)
 		ACCESS_ONCE(dotg->vbus_fault) = false;
 #endif
@@ -893,6 +928,11 @@ static void dwc3_otg_sm_work(struct work_struct *w)
 					"unable to start A-device\n");
 				phy->state = OTG_STATE_A_IDLE;
 				pm_runtime_put_sync(phy->dev);
+#ifdef CONFIG_MACH_APQ8084_EF67
+				if (dotg->vbus_cleanup_pending)
+					queue_delayed_work(system_nrt_wq, &dotg->sm_work,
+							   VBUS_REG_CHECK_DELAY);
+#endif
 				return;
 			} else {
 				/*
