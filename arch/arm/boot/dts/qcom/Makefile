@@ -96,6 +96,9 @@ dtb-$(CONFIG_ARCH_MPQ8092) += mpq8092-sim.dtb \
 	mpq8092-cdp.dtb \
 	mpq8092-dtv.dtb \
 	mpq8092-dma.dtb
+ifeq ($(CONFIG_MACH_APQ8084_EF67),y)
+dtb-$(CONFIG_ARCH_APQ8084) += apq8084-ef67s.dtb apq8084-ef67l.dtb
+else
 dtb-$(CONFIG_ARCH_APQ8084) += apq8084-v1.0-old-pwr-grid-liquid.dtb \
 	apq8084-v1.1-old-pwr-grid-liquid.dtb \
 	apq8084-v1.1-liquid.dtb \
@@ -124,6 +127,8 @@ dtb-$(CONFIG_ARCH_APQ8084) += apq8084-v1.0-old-pwr-grid-liquid.dtb \
 	apq8084-v1.1-mdm9x35-alt-cdp.dtb \
 	apq8084-v1.1-sbc.dtb
 dtb-$(CONFIG_ARCH_MSM) += msmplutonium-sim.dtb
+
+endif
 
 DTB_NAMES := $(subst $\",,$(CONFIG_BUILD_ARM_APPENDED_DTB_IMAGE_NAMES))
 ifneq ($(DTB_NAMES),)

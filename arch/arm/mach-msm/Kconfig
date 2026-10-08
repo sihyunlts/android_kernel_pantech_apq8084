@@ -75,6 +75,13 @@ config ARCH_APQ8084
 	select PINCTRL
 	select PINCTRL_MSM_TLMM_V3
 
+config MACH_APQ8084_EF67
+	bool "Pantech EF67 (IM-A930S/L) device trees"
+	depends on ARCH_APQ8084
+	help
+	  Build the EF67 device trees using the common IM-A930S S0226114
+	  hardware description and model-specific bootloader board IDs.
+
 config ARCH_MPQ8092
 	bool "MPQ8092"
 	select REGULATOR

@@ -1,0 +1,11 @@
+/*
+ * Pantech IM-A930S; hardware settings use the shared S0226114 baseline.
+ */
+/dts-v1/;
+
+#include "apq8084-ef67.dtsi"
+
+/ {
+	model = "Qualcomm APQ 8084 v1.1, SMB1357 MDM9x35 EF67S";
+	qcom,board-id = <0x1a3b 3>;
+};
