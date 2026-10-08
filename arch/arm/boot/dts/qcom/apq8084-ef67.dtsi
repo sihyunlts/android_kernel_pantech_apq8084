@@ -880,6 +880,10 @@
 		reg = <0x4a>;
 		interrupt-parent = <&msmgpio>;
 		interrupts = <0x8f 0x02>;
+		atmel,irq-gpio = <&msmgpio 143 0>;
+		atmel,reset-gpio = <&msmgpio 145 0>;
+		atmel,iovdd-gpio = <&msmgpio 144 0>;
+		avdd-supply = <&pma8084_l16>;
 	};
 };
 

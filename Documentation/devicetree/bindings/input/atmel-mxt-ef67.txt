@@ -1,0 +1,36 @@
+Pantech EF67 Atmel mXT641T touchscreen
+
+This binding describes the IM-A930S S0226114 board wiring. EF67 S and L
+use the same board configuration; L hardware compatibility is unverified.
+The driver accepts the stock family 0xa4, variant 0x07, version 0x10,
+build 0xaa, 32x20 matrix and 39-object profile. It writes stock finger,
+glove or passive-stylus settings to volatile RAM, without rewriting
+controller firmware or nonvolatile settings.
+
+Required properties:
+- compatible: "atmel,atmel_mxt_641t"
+- reg: I2C address 0x4a
+- interrupt-parent: GPIO interrupt controller
+- interrupts: GPIO143, falling-edge interrupt
+- atmel,irq-gpio: GPIO143, active low
+- atmel,reset-gpio: GPIO145, driven low during reset
+- atmel,iovdd-gpio: GPIO144, driven high to enable digital/I/O power
+- avdd-supply: analog supply, 3.3V (PMA8084 L16 on EF67)
+
+Example:
+
+atmel_mxt_fw21@4a {
+	compatible = "atmel,atmel_mxt_641t";
+	reg = <0x4a>;
+	interrupt-parent = <&msmgpio>;
+	interrupts = <143 2>;
+	atmel,irq-gpio = <&msmgpio 143 0>;
+	atmel,reset-gpio = <&msmgpio 145 0>;
+	atmel,iovdd-gpio = <&msmgpio 144 0>;
+	avdd-supply = <&pma8084_l16>;
+};
+
+The board's GPIO mux setup provides the stock IRQ/reset pin settings.
+The GPIO flags in the example follow the stock board's raw-level wiring;
+the driver uses the legacy GPIO API and explicitly drives reset/power.
+See Documentation/ABI/testing/sysfs-driver-ef67-mxt641t for mode selection.

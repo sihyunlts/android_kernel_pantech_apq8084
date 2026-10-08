@@ -98,6 +98,14 @@ config TOUCHSCREEN_ATMEL_MXT
 	  To compile this driver as a module, choose M here: the
 	  module will be called atmel_mxt_ts.
 
+config TOUCHSCREEN_EF67_MXT641T
+	tristate "Pantech EF67 Atmel mXT641T touchscreen"
+	depends on MACH_APQ8084_EF67 && I2C && OF && GPIOLIB && REGULATOR
+	help
+	  Support EF67 touch input, the stock finger/glove/stylus settings,
+	  and the capacitive keys below the screen. Controller firmware and
+	  nonvolatile settings are not rewritten.
+
 config TOUCHSCREEN_ATMEL_MAXTOUCH_TS
 	tristate "Atmel Maxtouch Touchscreen Family"
 	depends on I2C
