@@ -28,6 +28,11 @@
 #include <linux/regulator/of_regulator.h>
 #include <linux/regulator/machine.h>
 #include <linux/qpnp/qpnp-adc.h>
+#ifdef CONFIG_MACH_APQ8084_EF67
+#include <linux/alarmtimer.h>
+#include <linux/pm_wakeup.h>
+#include <linux/workqueue.h>
+#endif
 
 #define SMB135X_BITS_PER_REG	8
 
@@ -259,6 +264,9 @@ enum {
 	USER = BIT(0),
 	THERMAL = BIT(1),
 	CURRENT = BIT(2),
+#ifdef CONFIG_MACH_APQ8084_EF67
+	BATTERY = BIT(3),
+#endif
 };
 
 enum path_type {
@@ -277,6 +285,58 @@ struct smb135x_regulator {
 	struct regulator_desc	rdesc;
 	struct regulator_dev	*rdev;
 };
+
+#ifdef CONFIG_MACH_APQ8084_EF67
+#define EF67_THERMAL_POLL_MS 30000
+#define EF67_FASTCHG_REG 0x1c
+#define EF67_FASTCHG_MASK 0x1f
+#define EF67_FASTCHG_1200MA 0x0d
+#define EF67_FASTCHG_2000MA 0x19
+
+enum ef67_temp_state {
+	EF67_TEMP_COLD,
+	EF67_TEMP_COOL,
+	EF67_TEMP_NORMAL_LOW,
+	EF67_TEMP_NORMAL_HIGH,
+	EF67_TEMP_WARM,
+	EF67_TEMP_HOT,
+	EF67_TEMP_UNKNOWN,
+};
+
+struct ef67_temp_limit {
+	int temp_decic;
+	int state;
+	int current_ma;
+};
+
+/* Initial, rising and falling temperature limits, in 0.1 degrees C. */
+static const struct ef67_temp_limit ef67_temp_limits[3][6] = {
+	{
+		{-70, 0, 0},
+		{20, 1, 1200},
+		{381, 2, 2000},
+		{441, 3, 2000},
+		{591, 4, 1200},
+		{681, 5, 0},
+	},
+	{
+		{-40, 0, 0},
+		{50, 1, 1200},
+		{381, 2, 2000},
+		{439, 3, 2000},
+		{589, 4, 1200},
+		{681, 5, 0},
+	},
+	{
+		{-70, 0, 0},
+		{20, 1, 1200},
+		{381, 2, 2000},
+		{411, 3, 2000},
+		{561, 4, 1200},
+		{681, 5, 0},
+	},
+};
+#endif
 
 struct smb135x_chg {
 	struct i2c_client		*client;
@@ -337,8 +397,20 @@ struct smb135x_chg {
 	bool				soft_vfloat_comp_disabled;
 	struct mutex			irq_complete;
 	struct regulator		*therm_bias_vreg;
+	bool				therm_bias_enabled;
 #ifdef CONFIG_MACH_APQ8084_EF67
 	struct qpnp_vadc_chip		*vadc;
+	struct alarm			thermal_alarm;
+	struct delayed_work		thermal_work;
+	struct wakeup_source		thermal_wake;
+	bool				thermal_running;
+	bool				thermal_allowed;
+	bool				charging_requested;
+	int				temp_state;
+	int				applied_temp_state;
+	int				applied_temp_decic;
+	int				fastchg_reg;
+	int				last_temp_decic;
 #endif
 	struct delayed_work		wireless_insertion_work;
 
@@ -386,7 +458,7 @@ static int smb135x_read(struct smb135x_chg *chip, int reg,
 {
 	int rc;
 
-	if (chip->skip_reads) {
+	if (!IS_ENABLED(CONFIG_MACH_APQ8084_EF67) && chip->skip_reads) {
 		*val = 0;
 		return 0;
 	}
@@ -402,7 +474,7 @@ static int smb135x_write(struct smb135x_chg *chip, int reg,
 {
 	int rc;
 
-	if (chip->skip_writes)
+	if (!IS_ENABLED(CONFIG_MACH_APQ8084_EF67) && chip->skip_writes)
 		return 0;
 
 	mutex_lock(&chip->read_write_lock);
@@ -418,7 +490,8 @@ static int smb135x_masked_write(struct smb135x_chg *chip, int reg,
 	s32 rc;
 	u8 temp;
 
-	if (chip->skip_writes || chip->skip_reads)
+	if (!IS_ENABLED(CONFIG_MACH_APQ8084_EF67) &&
+	    (chip->skip_writes || chip->skip_reads))
 		return 0;
 
 	mutex_lock(&chip->read_write_lock);
@@ -644,6 +717,7 @@ static int smb135x_get_bms_property(struct smb135x_chg *chip,
 				  union power_supply_propval *val)
 {
 	struct power_supply *bms;
+	int rc;
 
 	if (!chip->bms_psy_name)
 		return -ENODEV;
@@ -651,8 +725,29 @@ static int smb135x_get_bms_property(struct smb135x_chg *chip,
 	if (!bms)
 		return -ENODEV;
 
-	return bms->get_property(bms, prop, val);
+	rc = bms->get_property(bms, prop, val);
+	put_device(bms->dev);
+	return rc;
 }
+
+#ifdef CONFIG_MACH_APQ8084_EF67
+static int smb135x_set_bms_property(struct smb135x_chg *chip,
+				  enum power_supply_property prop,
+				  const union power_supply_propval *val)
+{
+	struct power_supply *bms;
+	int rc;
+
+	if (!chip->bms_psy_name)
+		return -ENODEV;
+	bms = power_supply_get_by_name(chip->bms_psy_name);
+	if (!bms)
+		return -ENODEV;
+	rc = bms->set_property ? bms->set_property(bms, prop, val) : -ENODEV;
+	put_device(bms->dev);
+	return rc;
+}
+#endif
 
 static int smb135x_get_prop_batt_capacity(struct smb135x_chg *chip,
 					union power_supply_propval *val)
@@ -685,22 +780,55 @@ static int smb135x_get_prop_batt_temp(struct smb135x_chg *chip,
 }
 #endif
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+static int ef67_next_temp_state(struct smb135x_chg *chip, int temp_decic)
+{
+	const struct ef67_temp_limit *limits;
+	int i;
+
+	if (temp_decic == chip->applied_temp_decic &&
+	    chip->applied_temp_state != EF67_TEMP_UNKNOWN)
+		return chip->applied_temp_state;
+	if (chip->temp_state == EF67_TEMP_UNKNOWN)
+		limits = ef67_temp_limits[0];
+	else if (chip->temp_state > chip->applied_temp_state ||
+		 temp_decic > chip->applied_temp_decic)
+		limits = ef67_temp_limits[1];
+	else
+		limits = ef67_temp_limits[2];
+
+	for (i = 0; i < ARRAY_SIZE(ef67_temp_limits[0]); i++)
+		if (temp_decic < limits[i].temp_decic)
+			return limits[i].state;
+
+	/* Temperatures above the last stock interval must stay inhibited. */
+	return EF67_TEMP_HOT;
+}
+#endif
+
 static int smb135x_get_prop_batt_health(struct smb135x_chg *chip)
 {
-	union power_supply_propval ret = {0, };
-
 	if (chip->batt_hot)
-		ret.intval = POWER_SUPPLY_HEALTH_OVERHEAT;
-	else if (chip->batt_cold)
-		ret.intval = POWER_SUPPLY_HEALTH_COLD;
-	else if (chip->batt_warm)
-		ret.intval = POWER_SUPPLY_HEALTH_WARM;
-	else if (chip->batt_cool)
-		ret.intval = POWER_SUPPLY_HEALTH_COOL;
-	else
-		ret.intval = POWER_SUPPLY_HEALTH_GOOD;
-
-	return ret.intval;
+		return POWER_SUPPLY_HEALTH_OVERHEAT;
+	if (chip->batt_cold)
+		return POWER_SUPPLY_HEALTH_COLD;
+#ifdef CONFIG_MACH_APQ8084_EF67
+	if (chip->temp_state == EF67_TEMP_UNKNOWN)
+		return POWER_SUPPLY_HEALTH_UNKNOWN;
+	if (chip->temp_state == EF67_TEMP_COLD)
+		return POWER_SUPPLY_HEALTH_COLD;
+	if (chip->temp_state == EF67_TEMP_HOT)
+		return POWER_SUPPLY_HEALTH_OVERHEAT;
+	if (chip->temp_state == EF67_TEMP_COOL)
+		return POWER_SUPPLY_HEALTH_COOL;
+	if (chip->temp_state == EF67_TEMP_WARM)
+		return POWER_SUPPLY_HEALTH_WARM;
+#endif
+	if (chip->batt_warm)
+		return POWER_SUPPLY_HEALTH_WARM;
+	if (chip->batt_cool)
+		return POWER_SUPPLY_HEALTH_COOL;
+	return POWER_SUPPLY_HEALTH_GOOD;
 }
 
 static int smb135x_enable_volatile_writes(struct smb135x_chg *chip)
@@ -1132,18 +1260,22 @@ static int smb135x_set_appropriate_current(struct smb135x_chg *chip,
 static int __smb135x_charging(struct smb135x_chg *chip, int enable)
 {
 	int rc = 0;
+	bool charge_enabled = enable;
 
-	pr_debug("charging enable = %d\n", enable);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	charge_enabled = enable && chip->thermal_allowed;
+#endif
+	pr_debug("charging enable = %d\n", charge_enabled);
 
 	rc = smb135x_masked_write(chip, CMD_CHG_REG,
-			CMD_CHG_EN, enable ? CMD_CHG_EN : 0);
+			CMD_CHG_EN, charge_enabled ? CMD_CHG_EN : 0);
 	if (rc < 0) {
 		dev_err(chip->dev,
 			"Couldn't set CHG_ENABLE_BIT enable = %d rc = %d\n",
 			enable, rc);
 		return rc;
 	}
-	chip->chg_enabled = enable;
+	chip->chg_enabled = charge_enabled;
 
 	/* set the suspended status */
 	rc = smb135x_path_suspend(chip, DC, USER, !enable);
@@ -1166,13 +1298,170 @@ static int __smb135x_charging(struct smb135x_chg *chip, int enable)
 	return rc;
 }
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+/* Called with current_change_lock held. */
+static int ef67_update_thermal(struct smb135x_chg *chip)
+{
+	union power_supply_propval temp, voltage;
+	int state, current_ma, reg, rc, stop_rc;
+
+	chip->thermal_allowed = false;
+	rc = smb135x_get_prop_batt_temp(chip, &temp);
+	if (rc)
+		goto inhibit;
+	if (!smb135x_get_prop_batt_present(chip)) {
+		rc = -ENODEV;
+		goto inhibit;
+	}
+	rc = smb135x_get_bms_property(chip, POWER_SUPPLY_PROP_VOLTAGE_NOW,
+				      &voltage);
+	if (rc)
+		goto inhibit;
+	rc = smb135x_set_bms_property(chip, POWER_SUPPLY_PROP_TEMP, &temp);
+	if (rc)
+		goto inhibit;
+
+	state = ef67_next_temp_state(chip, temp.intval);
+	chip->temp_state = state;
+	chip->last_temp_decic = temp.intval;
+	current_ma = ef67_temp_limits[0][state].current_ma;
+	if (current_ma && !chip->batt_hot && !chip->batt_cold &&
+	    chip->thermal_running && chip->usb_present) {
+		reg = current_ma == 1200 ? EF67_FASTCHG_1200MA :
+			EF67_FASTCHG_2000MA;
+		if (chip->fastchg_reg != reg) {
+			/* Stop charging before changing its current ceiling. */
+			rc = __smb135x_charging(chip, chip->charging_requested);
+			if (rc)
+				goto inhibit;
+			rc = smb135x_masked_write(chip, EF67_FASTCHG_REG,
+					EF67_FASTCHG_MASK, reg);
+			if (rc)
+				goto inhibit;
+			chip->fastchg_reg = reg;
+		}
+		chip->thermal_allowed = true;
+	}
+
+	rc = smb135x_path_suspend(chip, USB, BATTERY, false);
+	if (rc)
+		goto inhibit;
+	rc = smb135x_path_suspend(chip, DC, BATTERY, false);
+	if (rc)
+		goto inhibit;
+	if (chip->thermal_running && chip->usb_present)
+		alarm_start_relative(&chip->thermal_alarm,
+				     ns_to_ktime((s64)EF67_THERMAL_POLL_MS * NSEC_PER_MSEC));
+	rc = __smb135x_charging(chip, chip->charging_requested);
+	if (rc)
+		goto inhibit;
+	if (chip->usb_present ||
+	    (chip->dc_psy_type != -EINVAL && chip->dc_present)) {
+		chip->applied_temp_state = state;
+		chip->applied_temp_decic = temp.intval;
+	}
+	return 0;
+
+inhibit:
+	chip->temp_state = EF67_TEMP_UNKNOWN;
+	chip->fastchg_reg = -1;
+	chip->thermal_allowed = false;
+	stop_rc = __smb135x_charging(chip, chip->charging_requested);
+	if (stop_rc)
+		dev_err(chip->dev, "Couldn't inhibit charging rc=%d\n", stop_rc);
+	stop_rc = smb135x_path_suspend(chip, USB, BATTERY, true);
+	if (stop_rc)
+		dev_err(chip->dev, "Couldn't suspend USB on battery error rc=%d\n",
+			stop_rc);
+	stop_rc = smb135x_path_suspend(chip, DC, BATTERY, true);
+	if (stop_rc)
+		dev_err(chip->dev, "Couldn't suspend DC on battery error rc=%d\n",
+			stop_rc);
+	return rc;
+}
+
+static enum alarmtimer_restart ef67_thermal_alarm(struct alarm *alarm,
+						ktime_t now)
+{
+	struct smb135x_chg *chip = container_of(alarm, struct smb135x_chg,
+						thermal_alarm);
+
+	__pm_stay_awake(&chip->thermal_wake);
+	mod_delayed_work(system_freezable_wq, &chip->thermal_work, 0);
+	return ALARMTIMER_NORESTART;
+}
+
+static void ef67_thermal_work(struct work_struct *work)
+{
+	struct smb135x_chg *chip = container_of(to_delayed_work(work),
+					struct smb135x_chg, thermal_work);
+	bool was_enabled, changed, charging_changed;
+	int last_temp, rc;
+
+	__pm_stay_awake(&chip->thermal_wake);
+	mutex_lock(&chip->current_change_lock);
+	if (!chip->thermal_running)
+		goto out;
+	was_enabled = chip->chg_enabled;
+	last_temp = chip->last_temp_decic;
+	rc = ef67_update_thermal(chip);
+	if (rc)
+		dev_err(chip->dev, "Battery thermal check failed rc=%d\n", rc);
+	charging_changed = was_enabled != chip->chg_enabled;
+	changed = charging_changed || last_temp != chip->last_temp_decic || rc;
+	if (chip->usb_present ||
+	    (chip->dc_psy_type != -EINVAL && chip->dc_present))
+		alarm_start_relative(&chip->thermal_alarm,
+				     ns_to_ktime((s64)EF67_THERMAL_POLL_MS * NSEC_PER_MSEC));
+	else
+		queue_delayed_work(system_freezable_wq, &chip->thermal_work,
+				   msecs_to_jiffies(EF67_THERMAL_POLL_MS));
+	mutex_unlock(&chip->current_change_lock);
+	if (changed)
+		power_supply_changed(&chip->batt_psy);
+	if (charging_changed)
+		power_supply_changed(chip->usb_psy);
+	__pm_relax(&chip->thermal_wake);
+	return;
+out:
+	mutex_unlock(&chip->current_change_lock);
+	__pm_relax(&chip->thermal_wake);
+}
+
+static void ef67_stop_thermal(struct smb135x_chg *chip)
+{
+	mutex_lock(&chip->current_change_lock);
+	chip->thermal_running = false;
+	chip->thermal_allowed = false;
+	chip->charging_requested = false;
+	__smb135x_charging(chip, false);
+	mutex_unlock(&chip->current_change_lock);
+	alarm_cancel(&chip->thermal_alarm);
+	cancel_delayed_work_sync(&chip->thermal_work);
+	__pm_relax(&chip->thermal_wake);
+	wakeup_source_trash(&chip->thermal_wake);
+}
+#endif
+
 static int smb135x_charging(struct smb135x_chg *chip, int enable)
 {
 	int rc = 0;
 
 	pr_debug("charging enable = %d\n", enable);
 
-	__smb135x_charging(chip, enable);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	mutex_lock(&chip->current_change_lock);
+	chip->charging_requested = !!enable;
+	if (!chip->resume_completed)
+		rc = -EBUSY;
+	else if (enable)
+		rc = ef67_update_thermal(chip);
+	else
+		rc = __smb135x_charging(chip, false);
+	mutex_unlock(&chip->current_change_lock);
+#else
+	rc = __smb135x_charging(chip, enable);
+#endif
 
 	if (chip->usb_psy) {
 		pr_debug("usb psy changed\n");
@@ -1271,8 +1560,7 @@ static int smb135x_battery_set_property(struct power_supply *psy,
 
 	switch (prop) {
 	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
-		smb135x_charging(chip, val->intval);
-		break;
+		return smb135x_charging(chip, val->intval);
 	case POWER_SUPPLY_PROP_CAPACITY:
 		chip->fake_battery_soc = val->intval;
 		power_supply_changed(&chip->batt_psy);
@@ -1393,6 +1681,12 @@ static void smb135x_external_power_changed(struct power_supply *psy)
 		current_limit = prop.intval / 1000;
 
 	pr_debug("current_limit = %d\n", current_limit);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	mutex_lock(&chip->current_change_lock);
+	if (chip->thermal_running && chip->resume_completed)
+		ef67_update_thermal(chip);
+	mutex_unlock(&chip->current_change_lock);
+#endif
 
 	if (chip->usb_psy_ma != current_limit) {
 		mutex_lock(&chip->current_change_lock);
@@ -2489,6 +2783,9 @@ static int set_reg(void *data, u64 val)
 	int rc;
 	u8 temp;
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+	return -EPERM;
+#endif
 	temp = (u8) val;
 	rc = smb135x_write(chip, chip->peek_poke_address, temp);
 	if (rc < 0) {
@@ -2658,6 +2955,46 @@ static int determine_initial_status(struct smb135x_chg *chip)
 	return 0;
 }
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+static int ef67_charger_configure(struct smb135x_chg *chip)
+{
+	static const struct {
+		u8 reg;
+		u8 mask;
+		u8 value;
+	} settings[] = {
+		{0x02, 0x10, 0x00},
+		{CFG_D_REG, 0x08, 0x08},
+		{CFG_C_REG, 0xe0, 0x00},
+		{0x13, 0x0f, 0x0c},
+		{EF67_FASTCHG_REG, EF67_FASTCHG_MASK, EF67_FASTCHG_2000MA},
+		{0x1d, 0xc0, 0x40},
+		{0x1d, 0x3f, 0x00},
+		/* Stock command defaults with charging and OTG disabled. */
+		{CMD_CHG_REG, 0xff, 0x14},
+		{CFG_14_REG, 0xff, 0x12},
+		{CFG_1A_REG, 0xff, 0x00},
+		{CFG_E_REG, POLARITY_100_500_BIT, POLARITY_100_500_BIT},
+		{USBIN_DCIN_CFG_REG, USBIN_SUSPEND_VIA_COMMAND_BIT,
+			USBIN_SUSPEND_VIA_COMMAND_BIT},
+		{VFLOAT_REG, 0xff, 0x2e},
+		{0x06, 0x08, 0x08},
+		{CFG_3_REG, CHG_ITERM_MASK, CHG_ITERM_100MA},
+		{CFG_14_REG, DISABLE_CURRENT_TERM_BIT, 0x00},
+	};
+	int i, rc;
+
+	for (i = 0; i < ARRAY_SIZE(settings); i++) {
+		rc = smb135x_masked_write(chip, settings[i].reg,
+					settings[i].mask, settings[i].value);
+		if (rc)
+			return rc;
+	}
+	chip->fastchg_reg = EF67_FASTCHG_2000MA;
+	return 0;
+}
+#endif
+
 static int smb135x_hw_init(struct smb135x_chg *chip)
 {
 	int rc;
@@ -2670,6 +3007,7 @@ static int smb135x_hw_init(struct smb135x_chg *chip)
 			pr_err("Couldn't enable therm-bias rc = %d\n", rc);
 			return rc;
 		}
+		chip->therm_bias_enabled = true;
 	}
 
 	rc = smb135x_enable_volatile_writes(chip);
@@ -2678,6 +3016,13 @@ static int smb135x_hw_init(struct smb135x_chg *chip)
 				rc);
 		return rc;
 	}
+
+#ifdef CONFIG_MACH_APQ8084_EF67
+	rc = smb135x_masked_write(chip, CMD_CHG_REG, CMD_CHG_EN | OTG_EN, 0);
+	if (rc)
+		return rc;
+	chip->chg_enabled = false;
+#endif
 
 	/*
 	 * force using current from the register i.e. ignore auto
@@ -2696,6 +3041,13 @@ static int smb135x_hw_init(struct smb135x_chg *chip)
 		dev_err(chip->dev, "Couldn't set input limit cmd rc=%d\n", rc);
 		return rc;
 	}
+
+#ifdef CONFIG_MACH_APQ8084_EF67
+	rc = ef67_charger_configure(chip);
+	if (rc)
+		return rc;
+	goto configure_safety_timer;
+#endif
 
 	/* set bit 0 = 100mA bit 1 = 500mA and set register control */
 	rc = smb135x_masked_write(chip, CFG_E_REG,
@@ -2784,6 +3136,9 @@ static int smb135x_hw_init(struct smb135x_chg *chip)
 		}
 	}
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+configure_safety_timer:
+#endif
 	/* set the safety time voltage */
 	if (chip->safety_time != -EINVAL) {
 		if (chip->safety_time == 0) {
@@ -2826,7 +3181,13 @@ static int smb135x_hw_init(struct smb135x_chg *chip)
 		return rc;
 	}
 
-	__smb135x_charging(chip, chip->chg_enabled);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	rc = __smb135x_charging(chip, chip->charging_requested);
+#else
+	rc = __smb135x_charging(chip, chip->chg_enabled);
+#endif
+	if (rc)
+		return rc;
 
 	/* interrupt enabling - active low */
 	if (chip->client->irq) {
@@ -3018,6 +3379,10 @@ static int smb_parse_dt(struct smb135x_chg *chip)
 
 	chip->chg_enabled = !(of_property_read_bool(node,
 						"qcom,charging-disabled"));
+#ifdef CONFIG_MACH_APQ8084_EF67
+	chip->charging_requested = chip->chg_enabled;
+	chip->chg_enabled = false;
+#endif
 
 	rc = of_property_read_string(node, "qcom,bms-psy-name",
 						&chip->bms_psy_name);
@@ -3083,6 +3448,13 @@ static int smb135x_charger_probe(struct i2c_client *client,
 	chip->dev = &client->dev;
 	chip->usb_psy = usb_psy;
 	chip->fake_battery_soc = -EINVAL;
+#ifdef CONFIG_MACH_APQ8084_EF67
+	chip->temp_state = EF67_TEMP_UNKNOWN;
+	chip->applied_temp_state = EF67_TEMP_UNKNOWN;
+	chip->applied_temp_decic = INT_MIN;
+	chip->last_temp_decic = INT_MIN;
+	chip->fastchg_reg = -1;
+#endif
 
 	INIT_DELAYED_WORK(&chip->wireless_insertion_work,
 					wireless_insertion_work);
@@ -3097,6 +3469,16 @@ static int smb135x_charger_probe(struct i2c_client *client,
 		return -ENODEV;
 	}
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+	/* Inhibit charging even when VADC or RTC probe must be deferred. */
+	rc = smb135x_enable_volatile_writes(chip);
+	if (rc)
+		return rc;
+	rc = smb135x_masked_write(chip, CMD_CHG_REG, CMD_CHG_EN | OTG_EN, 0);
+	if (rc)
+		return rc;
+#endif
+
 	rc = smb_parse_dt(chip);
 	if (rc < 0) {
 		dev_err(&client->dev, "Unable to parse DT nodes\n");
@@ -3107,6 +3489,8 @@ static int smb135x_charger_probe(struct i2c_client *client,
 	chip->vadc = qpnp_get_vadc(chip->dev, "smb1358");
 	if (IS_ERR(chip->vadc))
 		return PTR_ERR(chip->vadc);
+	if (!alarmtimer_get_rtcdev())
+		return -EPROBE_DEFER;
 #endif
 
 	i2c_set_clientdata(client, chip);
@@ -3247,6 +3631,7 @@ static int smb135x_charger_probe(struct i2c_client *client,
 				"Couldn't create data debug file rc = %d\n",
 				rc);
 
+#ifndef CONFIG_MACH_APQ8084_EF67
 		ent = debugfs_create_x32("skip_writes",
 					  S_IFREG | S_IWUSR | S_IRUGO,
 					  chip->debug_root,
@@ -3264,6 +3649,7 @@ static int smb135x_charger_probe(struct i2c_client *client,
 			dev_err(chip->dev,
 				"Couldn't create data debug file rc = %d\n",
 				rc);
+#endif
 
 		ent = debugfs_create_file("irq_count", S_IFREG | S_IRUGO,
 					  chip->debug_root, chip,
@@ -3282,6 +3668,7 @@ static int smb135x_charger_probe(struct i2c_client *client,
 				"Couldn't create recharge debug file rc = %d\n",
 				rc);
 
+#ifndef CONFIG_MACH_APQ8084_EF67
 		ent = debugfs_create_x32("usb_suspend_votes",
 					  S_IFREG | S_IWUSR | S_IRUGO,
 					  chip->debug_root,
@@ -3299,7 +3686,18 @@ static int smb135x_charger_probe(struct i2c_client *client,
 			dev_err(chip->dev,
 				"Couldn't create dc vote file rc = %d\n",
 				rc);
-		}
+#endif
+	}
+
+#ifdef CONFIG_MACH_APQ8084_EF67
+	INIT_DELAYED_WORK(&chip->thermal_work, ef67_thermal_work);
+	alarm_init(&chip->thermal_alarm, ALARM_BOOTTIME, ef67_thermal_alarm);
+	wakeup_source_init(&chip->thermal_wake, "ef67-battery-thermal");
+	mutex_lock(&chip->current_change_lock);
+	chip->thermal_running = true;
+	mutex_unlock(&chip->current_change_lock);
+	queue_delayed_work(system_freezable_wq, &chip->thermal_work, 0);
+#endif
 
 	dev_info(chip->dev, "SMB135X version = %s revision = %s successfully probed batt=%d dc = %d usb = %d\n",
 			version_str[chip->version],
@@ -3314,6 +3712,13 @@ unregister_dc_psy:
 unregister_batt_psy:
 	power_supply_unregister(&chip->batt_psy);
 free_regulator:
+#ifdef CONFIG_MACH_APQ8084_EF67
+	smb135x_masked_write(chip, CMD_CHG_REG, CMD_CHG_EN | OTG_EN, 0);
+#endif
+	if (chip->therm_bias_enabled) {
+		regulator_disable(chip->therm_bias_vreg);
+		chip->therm_bias_enabled = false;
+	}
 	smb135x_regulator_deinit(chip);
 	return rc;
 }
@@ -3323,7 +3728,12 @@ static int smb135x_charger_remove(struct i2c_client *client)
 	int rc;
 	struct smb135x_chg *chip = i2c_get_clientdata(client);
 
-	if (chip->therm_bias_vreg) {
+#ifdef CONFIG_MACH_APQ8084_EF67
+	ef67_stop_thermal(chip);
+#endif
+	cancel_delayed_work_sync(&chip->wireless_insertion_work);
+
+	if (chip->therm_bias_enabled) {
 		rc = regulator_disable(chip->therm_bias_vreg);
 		if (rc)
 			pr_err("Couldn't disable therm-bias rc = %d\n", rc);
@@ -3349,6 +3759,13 @@ static int smb135x_suspend(struct device *dev)
 	struct smb135x_chg *chip = i2c_get_clientdata(client);
 	int i, rc;
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+	if ((chip->usb_present ||
+	    (chip->dc_psy_type != -EINVAL && chip->dc_present)) && !alarmtimer_get_rtcdev())
+		return -EBUSY;
+	mutex_lock(&chip->current_change_lock);
+#endif
+
 	/* Save the current IRQ config */
 	for (i = 0; i < 3; i++) {
 		rc = smb135x_read(chip, IRQ_CFG_REG + i,
@@ -3358,6 +3775,7 @@ static int smb135x_suspend(struct device *dev)
 				"Couldn't save irq cfg regs rc=%d\n", rc);
 	}
 
+#ifndef CONFIG_MACH_APQ8084_EF67
 	/* enable only important IRQs */
 	rc = smb135x_write(chip, IRQ_CFG_REG, IRQ_USBIN_UV_BIT);
 	if (rc < 0)
@@ -3374,9 +3792,14 @@ static int smb135x_suspend(struct device *dev)
 	if (rc < 0)
 		dev_err(chip->dev, "Couldn't set irq3_cfg rc = %d\n", rc);
 
+#endif
+
 	mutex_lock(&chip->irq_complete);
 	chip->resume_completed = false;
 	mutex_unlock(&chip->irq_complete);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	mutex_unlock(&chip->current_change_lock);
+#endif
 
 	return 0;
 }
@@ -3399,6 +3822,9 @@ static int smb135x_resume(struct device *dev)
 	struct smb135x_chg *chip = i2c_get_clientdata(client);
 	int i, rc;
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+	mutex_lock(&chip->current_change_lock);
+#endif
 	/* Restore the IRQ config */
 	for (i = 0; i < 3; i++) {
 		rc = smb135x_write(chip, IRQ_CFG_REG + i,
@@ -3416,8 +3842,22 @@ static int smb135x_resume(struct device *dev)
 	} else {
 		mutex_unlock(&chip->irq_complete);
 	}
+#ifdef CONFIG_MACH_APQ8084_EF67
+	mutex_unlock(&chip->current_change_lock);
+	mod_delayed_work(system_freezable_wq, &chip->thermal_work, 0);
+#endif
 	return 0;
 }
+
+#ifdef CONFIG_MACH_APQ8084_EF67
+static void smb135x_charger_shutdown(struct i2c_client *client)
+{
+	struct smb135x_chg *chip = i2c_get_clientdata(client);
+
+	ef67_stop_thermal(chip);
+	smb135x_masked_write(chip, CMD_CHG_REG, OTG_EN, 0);
+}
+#endif
 
 static const struct dev_pm_ops smb135x_pm_ops = {
 	.resume		= smb135x_resume,
@@ -3440,6 +3880,9 @@ static struct i2c_driver smb135x_charger_driver = {
 	},
 	.probe		= smb135x_charger_probe,
 	.remove		= smb135x_charger_remove,
+#ifdef CONFIG_MACH_APQ8084_EF67
+	.shutdown	= smb135x_charger_shutdown,
+#endif
 	.id_table	= smb135x_charger_id,
 };
 

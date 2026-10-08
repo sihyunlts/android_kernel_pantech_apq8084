@@ -1,11 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* MAX17058 voltage and state-of-charge reporting for Pantech EF67. */
+/* MAX17058 fuel-gauge support for Pantech EF67. */
 
 #include <linux/bug.h>
 #include <linux/i2c.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/pm.h>
 #include <linux/power_supply.h>
@@ -14,6 +15,8 @@
 
 #define MAX17058_VCELL_REG	0x02
 #define MAX17058_SOC_REG		0x04
+#define MAX17058_CONFIG_REG	0x0c
+#define EF67_CONFIG_LOW_BYTE	0x1f
 #define MAX17058_POLL_MS		30000
 #define EF67_SOC_SCALE		512
 #define EF67_SOC_EMPTY_MILLIPERCENT	2140
@@ -23,6 +26,7 @@ struct ef67_max17058 {
 	struct i2c_client *client;
 	struct power_supply bms;
 	struct delayed_work poll_work;
+	struct mutex config_lock;
 	int last_voltage_uv;
 	int last_capacity;
 };
@@ -67,6 +71,54 @@ static int ef67_max17058_capacity(int raw_soc)
 static int ef67_max17058_voltage(int raw_voltage)
 {
 	return (raw_voltage >> 4) * 1250;
+}
+
+static int ef67_max17058_rcomp(int temp_decic)
+{
+	int temp_c = temp_decic / 10;
+	int rcomp = 86;
+
+	if (temp_c > 20)
+		rcomp -= (temp_c - 20) * 475 / 1000;
+	else if (temp_c < 20)
+		rcomp += (20 - temp_c) * 3500 / 1000;
+
+	return clamp(rcomp, 0, 255);
+}
+
+static int ef67_max17058_set_property(struct power_supply *psy,
+				    enum power_supply_property prop,
+				    const union power_supply_propval *val)
+{
+	struct ef67_max17058 *chip = container_of(psy,
+						struct ef67_max17058, bms);
+	u8 data[3];
+	int config, rc;
+
+	if (prop != POWER_SUPPLY_PROP_TEMP)
+		return -EINVAL;
+	if (val->intval < -400 || val->intval > 790)
+		return -ERANGE;
+
+	data[0] = MAX17058_CONFIG_REG;
+	data[1] = ef67_max17058_rcomp(val->intval);
+	data[2] = EF67_CONFIG_LOW_BYTE;
+	mutex_lock(&chip->config_lock);
+	config = max17058_read_word(chip->client, MAX17058_CONFIG_REG);
+	if (config < 0) {
+		rc = config;
+		goto out;
+	}
+	if (config == ((data[1] << 8) | data[2])) {
+		rc = 0;
+		goto out;
+	}
+	rc = i2c_master_send(chip->client, data, sizeof(data));
+	if (rc >= 0)
+		rc = rc == sizeof(data) ? 0 : -EIO;
+out:
+	mutex_unlock(&chip->config_lock);
+	return rc;
 }
 
 static enum power_supply_property ef67_max17058_properties[] = {
@@ -159,6 +211,8 @@ static int ef67_max17058_probe(struct i2c_client *client,
 	chip->bms.supplied_to = ef67_max17058_supplied_to;
 	chip->bms.num_supplicants = ARRAY_SIZE(ef67_max17058_supplied_to);
 	chip->bms.get_property = ef67_max17058_get_property;
+	chip->bms.set_property = ef67_max17058_set_property;
+	mutex_init(&chip->config_lock);
 	i2c_set_clientdata(client, chip);
 	INIT_DEFERRABLE_WORK(&chip->poll_work, ef67_max17058_poll);
 
