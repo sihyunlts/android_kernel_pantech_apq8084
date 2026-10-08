@@ -33,6 +33,8 @@
 #include <linux/pm_wakeup.h>
 #include <linux/workqueue.h>
 #include <mach/gpiomux.h>
+#include <linux/msm_tsens.h>
+#include <soc/qcom/smem.h>
 #endif
 
 #define SMB135X_BITS_PER_REG	8
@@ -295,6 +297,9 @@ struct smb135x_regulator {
 #define EF67_FASTCHG_2000MA 0x19
 #define EF67_OVP_GPIO 85
 #define EF67_OVP_RESET_MS 150
+#define EF67_BOOT_DATA_SIZE 44
+#define EF67_BOOT_FACTORY_ADC_WORD 1
+#define EF67_BOOT_POWER_ON_MODE_WORD 4
 
 static struct gpiomux_setting ef67_ovp_setting = {
 	.func = GPIOMUX_FUNC_GPIO,
@@ -428,6 +433,11 @@ struct smb135x_chg {
 	int				applied_temp_decic;
 	int				fastchg_reg;
 	int				last_temp_decic;
+	u32				boot_power_on_mode;
+	bool				boot_factory_dummy;
+	int				ap_usb_limit_ma;
+	int				usb_input_limit_ma;
+	int				applied_usb_current_ma;
 #endif
 	struct delayed_work		wireless_insertion_work;
 
@@ -1107,7 +1117,9 @@ static int smb135x_set_high_usb_chg_current(struct smb135x_chg *chip,
 			current_ma, CURRENT_150_MA);
 		rc = smb135x_masked_write(chip, CFG_5_REG,
 						USB_2_3_BIT, USB_2_3_BIT);
-		rc |= smb135x_masked_write(chip, CMD_INPUT_LIMIT,
+		if (rc)
+			return rc;
+		rc = smb135x_masked_write(chip, CMD_INPUT_LIMIT,
 				USB_100_500_AC_MASK, USB_100_VAL);
 		if (rc < 0)
 			dev_err(chip->dev, "Couldn't set %dmA rc=%d\n",
@@ -1143,8 +1155,14 @@ static int smb135x_set_usb_chg_current(struct smb135x_chg *chip,
 							int current_ma)
 {
 	int rc;
+	u8 usb3, mode;
 
 	pr_debug("USB current_ma = %d\n", current_ma);
+
+	if (current_ma < 0)
+		return -EINVAL;
+	if (current_ma == SUSPEND_CURRENT_MA)
+		return smb135x_path_suspend(chip, USB, CURRENT, true);
 
 	if (chip->workaround_flags & WRKARND_USB100_BIT) {
 		pr_info("USB requested = %dmA using %dmA\n", current_ma,
@@ -1156,46 +1174,34 @@ static int smb135x_set_usb_chg_current(struct smb135x_chg *chip,
 		/* choose the lowest available value of 100mA */
 		current_ma = CURRENT_100_MA;
 
-	if (current_ma == SUSPEND_CURRENT_MA) {
-		/* force suspend bit */
-		rc = smb135x_path_suspend(chip, USB, CURRENT, true);
-		goto out;
-	}
 	if (current_ma < CURRENT_150_MA) {
-		/* force 100mA */
-		rc = smb135x_masked_write(chip, CFG_5_REG, USB_2_3_BIT, 0);
-		rc |= smb135x_masked_write(chip, CMD_INPUT_LIMIT,
-				USB_100_500_AC_MASK, USB_100_VAL);
-		rc |= smb135x_path_suspend(chip, USB, CURRENT, false);
-		goto out;
-	}
-	/* specific current values */
-	if (current_ma == CURRENT_150_MA) {
-		rc = smb135x_masked_write(chip, CFG_5_REG,
-						USB_2_3_BIT, USB_2_3_BIT);
-		rc |= smb135x_masked_write(chip, CMD_INPUT_LIMIT,
-				USB_100_500_AC_MASK, USB_100_VAL);
-		rc |= smb135x_path_suspend(chip, USB, CURRENT, false);
-		goto out;
-	}
-	if (current_ma == CURRENT_500_MA) {
-		rc = smb135x_masked_write(chip, CFG_5_REG, USB_2_3_BIT, 0);
-		rc |= smb135x_masked_write(chip, CMD_INPUT_LIMIT,
-				USB_100_500_AC_MASK, USB_500_VAL);
-		rc |= smb135x_path_suspend(chip, USB, CURRENT, false);
-		goto out;
-	}
-	if (current_ma == CURRENT_900_MA) {
-		rc = smb135x_masked_write(chip, CFG_5_REG,
-						USB_2_3_BIT, USB_2_3_BIT);
-		rc |= smb135x_masked_write(chip, CMD_INPUT_LIMIT,
-				USB_100_500_AC_MASK, USB_500_VAL);
-		rc |= smb135x_path_suspend(chip, USB, CURRENT, false);
-		goto out;
+		usb3 = 0;
+		mode = USB_100_VAL;
+	} else if (current_ma == CURRENT_150_MA) {
+		usb3 = USB_2_3_BIT;
+		mode = USB_100_VAL;
+	} else if (current_ma == CURRENT_500_MA) {
+		usb3 = 0;
+		mode = USB_500_VAL;
+	} else if (current_ma == CURRENT_900_MA) {
+		usb3 = USB_2_3_BIT;
+		mode = USB_500_VAL;
+	} else {
+		rc = smb135x_set_high_usb_chg_current(chip, current_ma);
+		if (rc)
+			goto out;
+		goto unsuspend;
 	}
 
-	rc = smb135x_set_high_usb_chg_current(chip, current_ma);
-	rc |= smb135x_path_suspend(chip, USB, CURRENT, false);
+	rc = smb135x_masked_write(chip, CFG_5_REG, USB_2_3_BIT, usb3);
+	if (rc)
+		goto out;
+	rc = smb135x_masked_write(chip, CMD_INPUT_LIMIT,
+				USB_100_500_AC_MASK, mode);
+	if (rc)
+		goto out;
+unsuspend:
+	rc = smb135x_path_suspend(chip, USB, CURRENT, false);
 out:
 	if (rc < 0)
 		dev_err(chip->dev,
@@ -1238,10 +1244,12 @@ static int smb135x_set_appropriate_current(struct smb135x_chg *chip,
 	 * configuration and since it is the only source of power we should
 	 * not change it
 	 */
+#ifndef CONFIG_MACH_APQ8084_EF67
 	if (!chip->batt_present) {
 		pr_debug("ignoring current request since battery is absent\n");
 		return 0;
 	}
+#endif
 
 	if (path == USB) {
 		path_current = chip->usb_psy_ma;
@@ -1264,8 +1272,27 @@ static int smb135x_set_appropriate_current(struct smb135x_chg *chip,
 		therm_ma = path_current;
 
 	current_ma = min(therm_ma, path_current);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	if (path == USB) {
+		/* A suspend request must not be replaced by a current ceiling. */
+		if (current_ma != SUSPEND_CURRENT_MA)
+			current_ma = min(current_ma, chip->usb_input_limit_ma);
+		if (chip->applied_usb_current_ma == current_ma)
+			return 0;
+		if (chip->chg_enabled) {
+			rc = smb135x_masked_write(chip, CMD_CHG_REG, CMD_CHG_EN, 0);
+			if (rc)
+				return rc;
+			chip->chg_enabled = false;
+		}
+	}
+#endif
 	if (func != NULL)
 		rc = func(chip, current_ma);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	if (path == USB)
+		chip->applied_usb_current_ma = rc ? -1 : current_ma;
+#endif
 	if (rc < 0)
 		dev_err(chip->dev, "Couldn't set %s current to min(%d, %d)rc = %d\n",
 				path == USB ? "usb" : "dc",
@@ -1316,6 +1343,46 @@ static int __smb135x_charging(struct smb135x_chg *chip, int enable)
 }
 
 #ifdef CONFIG_MACH_APQ8084_EF67
+/* Called with current_change_lock held. */
+static int ef67_update_usb_current(struct smb135x_chg *chip, bool charging)
+{
+	struct tsens_device sensor = { .sensor_num = 2 };
+	union power_supply_propval current_prop;
+	unsigned long temp = (unsigned long)LONG_MIN;
+	int rc;
+
+	if (!chip->usb_present) {
+		chip->applied_usb_current_ma = -1;
+		return 0;
+	}
+	rc = chip->usb_psy->get_property(chip->usb_psy,
+					POWER_SUPPLY_PROP_CURRENT_MAX, &current_prop);
+	if (rc)
+		return rc;
+	if (current_prop.intval < 0)
+		return -EINVAL;
+	chip->usb_psy_ma = current_prop.intval / 1000;
+
+	if (charging && chip->boot_power_on_mode &&
+	    chip->usb_psy->type != POWER_SUPPLY_TYPE_USB) {
+		rc = tsens_get_temp(&sensor, &temp);
+		if (rc)
+			return rc;
+		if ((long)temp == LONG_MIN)
+			return -EIO;
+		if ((long)temp > 63)
+			chip->ap_usb_limit_ma = 1200;
+		else if ((long)temp <= 60)
+			chip->ap_usb_limit_ma = 1800;
+	}
+	chip->usb_input_limit_ma = chip->boot_factory_dummy ? 1200 : INT_MAX;
+	if (chip->boot_power_on_mode &&
+	    chip->usb_psy->type != POWER_SUPPLY_TYPE_USB)
+		chip->usb_input_limit_ma = min(chip->usb_input_limit_ma,
+					 chip->ap_usb_limit_ma);
+	return smb135x_set_appropriate_current(chip, USB);
+}
+
 /* Called with current_change_lock held and thermal_wake active. */
 static int ef67_recover_input(struct smb135x_chg *chip)
 {
@@ -1393,6 +1460,10 @@ static int ef67_update_thermal(struct smb135x_chg *chip)
 		chip->thermal_allowed = true;
 	}
 
+	rc = ef67_update_usb_current(chip,
+			chip->thermal_allowed && chip->charging_requested);
+	if (rc)
+		goto inhibit;
 	rc = smb135x_path_suspend(chip, USB, BATTERY, false);
 	if (rc)
 		goto inhibit;
@@ -1415,17 +1486,18 @@ static int ef67_update_thermal(struct smb135x_chg *chip)
 inhibit:
 	chip->temp_state = EF67_TEMP_UNKNOWN;
 	chip->fastchg_reg = -1;
+	chip->applied_usb_current_ma = -1;
 	chip->thermal_allowed = false;
 	stop_rc = __smb135x_charging(chip, chip->charging_requested);
 	if (stop_rc)
 		dev_err(chip->dev, "Couldn't inhibit charging rc=%d\n", stop_rc);
 	stop_rc = smb135x_path_suspend(chip, USB, BATTERY, true);
 	if (stop_rc)
-		dev_err(chip->dev, "Couldn't suspend USB on battery error rc=%d\n",
+		dev_err(chip->dev, "Couldn't suspend USB on charging check error rc=%d\n",
 			stop_rc);
 	stop_rc = smb135x_path_suspend(chip, DC, BATTERY, true);
 	if (stop_rc)
-		dev_err(chip->dev, "Couldn't suspend DC on battery error rc=%d\n",
+		dev_err(chip->dev, "Couldn't suspend DC on charging check error rc=%d\n",
 			stop_rc);
 	return rc;
 }
@@ -1555,6 +1627,12 @@ static int smb135x_system_temp_level_set(struct smb135x_chg *chip,
 		return 0;
 
 	mutex_lock(&chip->current_change_lock);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	if (!chip->thermal_running || !chip->resume_completed) {
+		rc = -EBUSY;
+		goto out;
+	}
+#endif
 	prev_therm_lvl = chip->therm_lvl_sel;
 	chip->therm_lvl_sel = lvl_sel;
 	if (chip->therm_lvl_sel == (chip->thermal_levels - 1)) {
@@ -1577,8 +1655,16 @@ static int smb135x_system_temp_level_set(struct smb135x_chg *chip,
 		goto out;
 	}
 
-	smb135x_set_appropriate_current(chip, USB);
-	smb135x_set_appropriate_current(chip, DC);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	rc = ef67_update_thermal(chip);
+#else
+	rc = smb135x_set_appropriate_current(chip, USB);
+#endif
+	if (rc)
+		goto out;
+	rc = smb135x_set_appropriate_current(chip, DC);
+	if (rc)
+		goto out;
 
 	if (prev_therm_lvl == chip->thermal_levels - 1) {
 		/*
@@ -1723,23 +1809,30 @@ static void smb135x_external_power_changed(struct power_supply *psy)
 	struct smb135x_chg *chip = container_of(psy,
 				struct smb135x_chg, batt_psy);
 	union power_supply_propval prop = {0,};
-	int rc, current_limit = 0;
+	int rc;
+#ifndef CONFIG_MACH_APQ8084_EF67
+	int current_limit = 0;
+#endif
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+	mutex_lock(&chip->current_change_lock);
+	if (chip->thermal_running && chip->resume_completed) {
+		rc = ef67_update_thermal(chip);
+		if (rc)
+			dev_err(chip->dev, "Couldn't update USB charging rc=%d\n", rc);
+	}
+	mutex_unlock(&chip->current_change_lock);
+#else
 	rc = chip->usb_psy->get_property(chip->usb_psy,
 				POWER_SUPPLY_PROP_CURRENT_MAX, &prop);
-	if (rc < 0)
+	if (rc < 0) {
 		dev_err(chip->dev,
 			"could not read USB current_max property, rc=%d\n", rc);
-	else
+		goto notify;
+	} else
 		current_limit = prop.intval / 1000;
 
 	pr_debug("current_limit = %d\n", current_limit);
-#ifdef CONFIG_MACH_APQ8084_EF67
-	mutex_lock(&chip->current_change_lock);
-	if (chip->thermal_running && chip->resume_completed)
-		ef67_update_thermal(chip);
-	mutex_unlock(&chip->current_change_lock);
-#endif
 
 	if (chip->usb_psy_ma != current_limit) {
 		mutex_lock(&chip->current_change_lock);
@@ -1750,12 +1843,15 @@ static void smb135x_external_power_changed(struct power_supply *psy)
 			dev_err(chip->dev, "Couldn't set usb current rc = %d\n",
 					rc);
 	}
+#endif
 
 	rc = chip->usb_psy->get_property(chip->usb_psy,
 			POWER_SUPPLY_PROP_ONLINE, &prop);
-	if (rc < 0)
+	if (rc < 0) {
 		dev_err(chip->dev,
 			"could not read USB ONLINE property, rc=%d\n", rc);
+		goto notify;
+	}
 
 	/* update online property */
 	rc = 0;
@@ -1769,6 +1865,7 @@ static void smb135x_external_power_changed(struct power_supply *psy)
 	if (rc < 0)
 		dev_err(chip->dev, "could not set usb online, rc=%d\n", rc);
 
+notify:
 	power_supply_changed(&chip->batt_psy);
 }
 
@@ -3501,6 +3598,10 @@ static int smb135x_charger_probe(struct i2c_client *client,
 	int rc;
 	struct smb135x_chg *chip;
 	struct power_supply *usb_psy;
+#ifdef CONFIG_MACH_APQ8084_EF67
+	const u32 *boot_data;
+	u32 factory_adc;
+#endif
 	u8 reg = 0;
 
 	usb_psy = power_supply_get_by_name("usb");
@@ -3525,6 +3626,9 @@ static int smb135x_charger_probe(struct i2c_client *client,
 	chip->applied_temp_decic = INT_MIN;
 	chip->last_temp_decic = INT_MIN;
 	chip->fastchg_reg = -1;
+	chip->ap_usb_limit_ma = INT_MAX;
+	chip->usb_input_limit_ma = INT_MAX;
+	chip->applied_usb_current_ma = -1;
 #endif
 
 	INIT_DELAYED_WORK(&chip->wireless_insertion_work,
@@ -3557,6 +3661,15 @@ static int smb135x_charger_probe(struct i2c_client *client,
 	}
 
 #ifdef CONFIG_MACH_APQ8084_EF67
+	boot_data = smem_find(SMEM_ID_VENDOR1, EF67_BOOT_DATA_SIZE,
+			      0, SMEM_ANY_HOST_FLAG);
+	if (IS_ERR(boot_data))
+		return PTR_ERR(boot_data);
+	if (!boot_data)
+		return -ENODATA;
+	factory_adc = boot_data[EF67_BOOT_FACTORY_ADC_WORD];
+	chip->boot_factory_dummy = factory_adc > 930 && factory_adc <= 1229;
+	chip->boot_power_on_mode = boot_data[EF67_BOOT_POWER_ON_MODE_WORD];
 	chip->vadc = qpnp_get_vadc(chip->dev, "smb1358");
 	if (IS_ERR(chip->vadc))
 		return PTR_ERR(chip->vadc);

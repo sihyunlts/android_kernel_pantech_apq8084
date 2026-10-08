@@ -79,6 +79,7 @@ config MACH_APQ8084_EF67
 	bool "Pantech EF67 (IM-A930S/L)"
 	depends on ARCH_APQ8084 && I2C && PM_SLEEP && RTC_CLASS = y
 	depends on SENSORS_QPNP_ADC_VOLTAGE = y
+	depends on THERMAL_TSENS8974 = y && MSM_SMEM
 	select SMB135X_CHARGER
 	help
 	  Support Pantech EF67 (IM-A930S/L) hardware and device trees.
