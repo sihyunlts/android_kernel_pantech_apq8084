@@ -16,6 +16,7 @@
 #include <asm/cacheflush.h>
 #include <asm/memory.h>
 #include <asm/outercache.h>
+#include <asm/system_misc.h>
 #include <mach/ef67-crash-log.h>
 #include <soc/qcom/smem.h>
 
@@ -169,6 +170,10 @@ void __init ef67_crash_log_init(void)
 	atomic_notifier_chain_register(&panic_notifier_list,
 				       &ef67_panic_notifier);
 	ef67_set_reset_reason(EF67_REASON_ABNORMAL);
+#ifdef CONFIG_DEBUG_USER
+	/* Stock fastboot omits image-header user_debug command-line options. */
+	user_debug |= UDBG_SEGV;
+#endif
 	pr_info("ef67-crash-log: stock kernel log handoff ready (%u bytes)\n",
 		log_buf_len_get());
 }

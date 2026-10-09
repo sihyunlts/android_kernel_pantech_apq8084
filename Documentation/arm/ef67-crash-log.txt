@@ -8,6 +8,11 @@ printk ring. On the tested stock fastboot path, image-header command-line
 options (including initcall_debug) were absent from the running kernel
 command line; do not assume such options reached the kernel.
 
+After validating the EF67S firmware handoff, diagnostic builds with
+CONFIG_DEBUG_USER enable ARM's existing SIGSEGV fault report. This records
+the fault address and user registers before signal delivery, including an
+init crash. Normal builds leave the ARM user_debug mask unchanged.
+
 The handoff is installed immediately after msm_smem_init, before the board's
 GPIO, power and clock initialization. It cannot record failures preceding
 that point, power loss, or a reset that destroys DDR contents. A successful
