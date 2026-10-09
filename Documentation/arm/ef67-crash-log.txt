@@ -13,6 +13,15 @@ CONFIG_DEBUG_USER enable ARM's existing SIGSEGV fault report. This records
 the fault address and user registers before signal delivery, including an
 init crash. Normal builds leave the ARM user_debug mask unchanged.
 
+For a boot that stalls without panicking, explicitly set
+CONFIG_EF67_CRASH_LOG_TIMEOUT to 1..300 seconds. Its default is zero (off),
+including the diagnostic overlay. After late kernel initialization it logs
+the firmware's bootargs strings and schedules a one-shot task-state report
+and deliberate panic. This stops even a successful boot; use it only with
+temporary fastboot boot images. A normal reboot cancels pending capture.
+The existing panic handoff saves the ring, and CONFIG_PANIC_TIMEOUT controls
+the restart delay. A manual reset need not preserve a usable crash log.
+
 The handoff is installed immediately after msm_smem_init, before the board's
 GPIO, power and clock initialization. It cannot record failures preceding
 that point, power loss, or a reset that destroys DDR contents. A successful

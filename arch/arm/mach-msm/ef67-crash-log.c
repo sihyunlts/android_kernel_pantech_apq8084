@@ -13,6 +13,11 @@
 #include <linux/printk.h>
 #include <linux/reboot.h>
 #include <linux/string.h>
+#if CONFIG_EF67_CRASH_LOG_TIMEOUT > 0
+#include <linux/jiffies.h>
+#include <linux/sched.h>
+#include <linux/workqueue.h>
+#endif
 #include <asm/cacheflush.h>
 #include <asm/memory.h>
 #include <asm/outercache.h>
@@ -44,6 +49,46 @@ struct ef67_crash_header {
 
 static struct ef67_crash_header *crash_header;
 static void __iomem *restart_imem;
+
+#if CONFIG_EF67_CRASH_LOG_TIMEOUT > 0
+static void ef67_capture_stalled_boot(struct work_struct *work)
+{
+	show_state();
+	panic("ef67-crash-log: requested timed boot capture");
+}
+
+static DECLARE_DELAYED_WORK(ef67_boot_capture, ef67_capture_stalled_boot);
+
+static int __init ef67_boot_capture_init(void)
+{
+	struct device_node *node;
+	const char *args;
+	int size, length;
+
+	if (!restart_imem)
+		return 0;
+
+	/* Preserve every firmware bootargs string, including any after a NUL. */
+	node = of_find_node_by_path("/chosen");
+	args = of_get_property(node, "bootargs", &size);
+	while (args && size > 0) {
+		length = strnlen(args, size);
+		pr_info("ef67-crash-log: firmware bootargs (%d bytes): %.*s\n",
+			length, length, args);
+		if (length == size)
+			break;
+		args += length + 1;
+		size -= length + 1;
+	}
+	of_node_put(node);
+	pr_warn("ef67-crash-log: forced capture in %u seconds\n",
+		CONFIG_EF67_CRASH_LOG_TIMEOUT);
+	schedule_delayed_work(&ef67_boot_capture,
+			     CONFIG_EF67_CRASH_LOG_TIMEOUT * HZ);
+	return 0;
+}
+late_initcall(ef67_boot_capture_init);
+#endif
 
 static void ef67_set_reset_reason(u32 reason)
 {
@@ -97,6 +142,9 @@ static struct notifier_block ef67_panic_notifier = {
 static int ef67_crash_reboot(struct notifier_block *nb, unsigned long event,
 			     void *data)
 {
+#if CONFIG_EF67_CRASH_LOG_TIMEOUT > 0
+	cancel_delayed_work(&ef67_boot_capture);
+#endif
 	if (event == SYS_RESTART)
 		ef67_set_reset_reason(EF67_REASON_REBOOT);
 	return NOTIFY_DONE;

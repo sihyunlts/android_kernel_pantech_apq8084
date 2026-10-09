@@ -93,6 +93,17 @@ config EF67_CRASH_LOG
 	  supported. This diagnostic option does not enable RAM or USB dump
 	  modes; prepare a collection path before testing a diagnostic image.
 
+config EF67_CRASH_LOG_TIMEOUT
+	int "EF67S diagnostic capture timeout in seconds"
+	depends on EF67_CRASH_LOG
+	range 0 300
+	default 0
+	help
+	  When nonzero, print task states and deliberately panic this many
+	  seconds after late kernel initialization to collect a stalled boot.
+	  This also stops a successful boot. Use only for temporary diagnostic
+	  boots; zero disables the timer. RAM and USB dump modes are unchanged.
+
 config ARCH_MPQ8092
 	bool "MPQ8092"
 	select REGULATOR
