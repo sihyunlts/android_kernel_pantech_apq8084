@@ -4,6 +4,14 @@
 
 menu "Misc devices"
 
+config DRV2603_EF67
+	bool "Pantech EF67 DRV2603 vibrator"
+	depends on MACH_APQ8084_EF67 && GPIOLIB && PWM_QPNP
+	depends on ANDROID_TIMED_OUTPUT
+	help
+	  Drive the EF67 vibrator with PMA8084 PWM and the Android timed
+	  output interface.
+
 config SENSORS_LIS3LV02D
 	tristate
 	depends on INPUT
