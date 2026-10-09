@@ -675,6 +675,8 @@ static int ef67_mxt_register_input(struct ef67_mxt *touch)
 	input->name = "atmel_mxt_641t";
 	input->id.bustype = BUS_I2C;
 	input->dev.parent = &touch->client->dev;
+	/* The 3.10 axis helpers do not enable the absolute event type. */
+	__set_bit(EV_ABS, input->evbit);
 	input_set_capability(input, EV_KEY, BTN_TOUCH);
 	for (i = 0; i < ARRAY_SIZE(ef67_mxt_keys); i++)
 		input_set_capability(input, EV_KEY, ef67_mxt_keys[i]);
