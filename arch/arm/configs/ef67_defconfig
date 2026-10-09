@@ -93,6 +93,8 @@ CONFIG_CPU_BOOST=y
 CONFIG_CPU_IDLE=y
 CONFIG_VFP=y
 CONFIG_NEON=y
+CONFIG_CMDLINE="console=NULL,115200,n8 androidboot.console=ttyHSL0 androidboot.hardware=qcom user_debug=31 msm_rtb.filter=0x1b7 dwc3_msm.cpu_to_affin=1 vmalloc=280M loglevel=0"
+CONFIG_CMDLINE_EXTEND=y
 # CONFIG_CORE_DUMP_DEFAULT_ELF_HEADERS is not set
 CONFIG_PM_AUTOSLEEP=y
 CONFIG_PM_WAKELOCKS=y

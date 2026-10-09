@@ -11,7 +11,8 @@ command line; do not assume such options reached the kernel.
 After validating the EF67S firmware handoff, diagnostic builds with
 CONFIG_DEBUG_USER enable ARM's existing SIGSEGV fault report. This records
 the fault address and user registers before signal delivery, including an
-init crash. Normal builds leave the ARM user_debug mask unchanged.
+init crash. Outside diagnostic builds this handoff does not override the
+ARM user_debug mask; any kernel command-line user_debug option still applies.
 
 For a boot that stalls without panicking, explicitly set
 CONFIG_EF67_CRASH_LOG_TIMEOUT to 1..300 seconds. Its default is zero (off),

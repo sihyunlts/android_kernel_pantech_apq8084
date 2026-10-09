@@ -1,0 +1,33 @@
+EF67S stock boot arguments
+=========================
+
+The EF67S stock ramdisk imports /init.${ro.hardware}.rc. It requires
+androidboot.hardware=qcom to load /init.qcom.rc and its filesystem and USB
+configuration. Without this argument, init derives an incompatible name
+from /proc/cpuinfo and cannot mount /system or start Android services.
+
+In a signed fastboot boot test, the image header contained the stock
+command line, but /chosen/bootargs contained only the bootloader's dynamic
+arguments. The effective kernel command line also lacked the header's
+arguments. The precise firmware cause of that loss is not established.
+
+ef67_defconfig embeds the stock header arguments in CONFIG_CMDLINE and
+enables CONFIG_CMDLINE_EXTEND. The device-tree parser now supports that
+existing option, following Android common's bounded concatenation:
+https://android.googlesource.com/kernel/common/+/daadb3bd0e8d3e317e36bc2c1542e86c528665e5/drivers/of/fdt.c
+
+The firmware arguments remain intact, including boot device, serial
+number, authorized-kernel state and selected panel. The stock defaults
+are appended within COMMAND_LINE_SIZE. CONFIG_CMDLINE_FORCE is not used.
+Other configurations retain their previous default/force behavior.
+
+The defaults match the EF67S stock boot header, including console,
+user_debug, RTB filter, USB affinity, vmalloc size and console log level.
+The ramdisk, init binary and SELinux policy are unchanged. This behavior
+has been investigated on EF67S; EF67L runtime compatibility is unverified.
+
+A signed temporary EF67S boot confirmed the combined effective command
+line, loading /init.qcom.rc, mounting the system partition, and launching
+system services. It subsequently reset via watchdog, with a separate
+pantech_server userspace fault in the last kernel records. This confirms
+argument delivery and init import, not a complete Android boot.
