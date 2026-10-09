@@ -289,6 +289,12 @@ static void ef67_fpc_capture(struct work_struct *work)
 			}
 			if (ret >= 0)
 				ret = 0;
+			if (!ret) {
+				mutex_lock(&fpc->data_lock);
+				fpc->finger_status = 2;
+				mutex_unlock(&fpc->data_lock);
+				msleep(30);
+			}
 		}
 		if (!ret)
 			ret = ef67_fpc_wait_finger(fpc);
