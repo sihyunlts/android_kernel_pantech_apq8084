@@ -236,7 +236,8 @@ static int ef67_mxt_read_objects(struct ef67_mxt *touch)
 			touch->count_address = address;
 			break;
 		case EF67_MXT_TOUCH_T100:
-			if (instances != 1 || object->report_ids != EF67_MXT_CONTACTS + 2)
+			/* Report capacity includes two status IDs and can exceed NUMTCH. */
+			if (instances != 1 || object->report_ids < EF67_MXT_CONTACTS + 2)
 				return -EINVAL;
 			touch->touch_report_min = report_id;
 			touch->touch_report_max = report_id + object->report_ids - 1;
