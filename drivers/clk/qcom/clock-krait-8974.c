@@ -21,12 +21,15 @@
 #include <linux/regulator/consumer.h>
 #include <linux/regulator/rpm-smd-regulator.h>
 #include <linux/of.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <linux/cpumask.h>
 #include <linux/clk/msm-clk-provider.h>
 #include <linux/clk/msm-clk.h>
 #include <linux/clk/msm-clock-generic.h>
 #include <soc/qcom/clock-local2.h>
 #include <soc/qcom/clock-krait.h>
+#include <soc/qcom/socinfo.h>
 
 #include <asm/cputype.h>
 
@@ -692,6 +695,41 @@ module_param_string(table_name, table_name, sizeof(table_name), S_IRUGO);
 static unsigned int pvs_config_ver;
 module_param(pvs_config_ver, uint, S_IRUGO);
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+/* S0226114 init reads this ABI before loading its configuration files. */
+static struct {
+	unsigned int speed_bin;
+	unsigned int pvs_bin;
+	unsigned int pvs_version;
+	unsigned int soc_version;
+	unsigned int svs_pvs_bin;
+} ef67_cpu_bins;
+static struct proc_dir_entry *ef67_cpu_bins_entry;
+
+static int ef67_cpu_bins_show(struct seq_file *file, void *data)
+{
+	seq_printf(file, "SPEED BIN : 0x%x, PVS : 0x%x, PVS VER : 0x%x, "
+		   "SOC VER : 0x%x, SVS_PVS : 0x%x\n ",
+		   ef67_cpu_bins.speed_bin, ef67_cpu_bins.pvs_bin,
+		   ef67_cpu_bins.pvs_version, ef67_cpu_bins.soc_version,
+		   ef67_cpu_bins.svs_pvs_bin);
+	return 0;
+}
+
+static int ef67_cpu_bins_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, ef67_cpu_bins_show, NULL);
+}
+
+static const struct file_operations ef67_cpu_bins_fops = {
+	.owner = THIS_MODULE,
+	.open = ef67_cpu_bins_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+#endif
+
 static int clock_krait_8974_driver_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -788,6 +826,14 @@ static int clock_krait_8974_driver_probe(struct platform_device *pdev)
 	}
 
 	get_krait_bin_format_b(pdev, &speed, &pvs, &svs_pvs, &pvs_ver);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	/* Report the fuse bins, before any voltage-table fallback changes pvs. */
+	ef67_cpu_bins.speed_bin = speed;
+	ef67_cpu_bins.pvs_bin = pvs;
+	ef67_cpu_bins.pvs_version = pvs_ver;
+	ef67_cpu_bins.soc_version = socinfo_get_version();
+	ef67_cpu_bins.svs_pvs_bin = svs_pvs;
+#endif
 	snprintf(table_name, ARRAY_SIZE(table_name),
 			"qcom,speed%d-pvs%d-bin-v%d", speed, pvs, pvs_ver);
 
@@ -909,6 +955,14 @@ static int clock_krait_8974_driver_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+	ef67_cpu_bins_entry = proc_create("acpu_pvs_info", 0444, NULL,
+					 &ef67_cpu_bins_fops);
+	if (!ef67_cpu_bins_entry) {
+		dev_err(dev, "Unable to publish EF67 CPU bin information\n");
+		return -ENOMEM;
+	}
+#endif
 	msm_clock_register(kpss_clocks_8974, ARRAY_SIZE(kpss_clocks_8974));
 
 	/*
@@ -984,6 +1038,9 @@ arch_initcall(clock_krait_8974_init);
 
 static void __exit clock_krait_8974_exit(void)
 {
+#ifdef CONFIG_MACH_APQ8084_EF67
+	proc_remove(ef67_cpu_bins_entry);
+#endif
 	platform_driver_unregister(&clock_krait_8974_driver);
 }
 module_exit(clock_krait_8974_exit);

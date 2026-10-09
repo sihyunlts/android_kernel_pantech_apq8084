@@ -1,0 +1,28 @@
+EF67 stock CPU bin information ABI
+=================================
+
+CONFIG_MACH_APQ8084_EF67 publishes /proc/acpu_pvs_info from the Krait clock
+driver. The file is read-only (0444) and uses the S0226114 stock format:
+
+  SPEED BIN : 0x%x, PVS : 0x%x, PVS VER : 0x%x, SOC VER : 0x%x, SVS_PVS : 0x%x
+
+The stock format ends with a newline and one space. Values are the speed,
+PVS, PVS version and SVS PVS bins read by get_krait_bin_format_b, plus
+socinfo_get_version(). Capture the fuse bins before voltage-table fallback
+changes the local PVS selection. No frequency, voltage, fuse or bin value
+is overridden. Publish after the probe's fallible hardware setup and before
+clock registration; remove the proc entry when the driver exits.
+
+The S0226114 kernel acpupvs_proc_show at 0xc081e764 prints these five fields
+from proc_speed (0xc14e66b4) and the next four words. Its format string is
+at 0xc0f27a8d. clock_krait_8974_driver_probe creates the proc entry at
+0xc081eea4 and stores the fuse bins and SoC version at 0xc081eec4..0xc081eed8.
+The connected stock IM-A930S returned bins 1, 10, 1, 0x10001, 15.
+
+This is a required userspace interface, not a diagnostic substitute. The
+stock ramdisk init opens the path at 0x9e0c. Its failure branch at 0x9e14
+calls fclose(NULL), crashing at 0x161ca while reading FILE flags at +12.
+Diagnostic boot 04 confirmed SIGSEGV address 0x0000000c, PC 0x161ca,
+LR 0x9e19 and r0=0. Restore the kernel ABI while keeping stock init intact.
+The ABI and live values were verified on S; L uses the shared S baseline
+and has not received a separate live compatibility test.
