@@ -4,6 +4,13 @@
 
 menu "Misc devices"
 
+config EF67_AVCLOG
+	bool "Pantech EF67 stock AVC log devices"
+	depends on MACH_APQ8084_EF67
+	help
+	  Provide the avclog shared memory and avcsync message queues required
+	  by the stock Pantech logging service during initialization.
+
 config NFC_PN547_EF67
 	bool "Pantech EF67 PN547 NFC"
 	depends on MACH_APQ8084_EF67 && I2C && GPIOLIB && WAKELOCK

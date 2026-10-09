@@ -1,0 +1,70 @@
+EF67 stock logging service interfaces
+====================================
+
+CONFIG_EF67_AVCLOG provides /dev/avclog and /dev/avcsync (root:root 0600).
+The ABI was recovered from the IM-A930S stock kernel, libsky_avclog.so and
+pantech_server. It restores the device initialization used by stock Android;
+it does not yet forward kernel SELinux audit records into the shared buffer.
+The ordinary audit path and SELinux permission checks are unchanged.
+
+/dev/avclog
+-----------
+mmap: offset zero, MAP_SHARED, 1024-byte buffer (rounded to one page).
+The first 16 bytes are the daemon's persistent header, the next 16 bytes
+are buffer state, and the remaining 992 bytes hold records. The entire
+backing page is initialized to zero and remains allocated for the boot.
+The daemon initializes the header magic (0xabababab) and loads its file.
+
+Raw ioctl numbers (not _IO encoded):
+  0: argument points to the u32 avcsync client identifier.
+  1: reset the u32 producer offset at byte 16.
+  2: stock diagnostic command; no state change.
+  3: acquire the shared-buffer semaphore.
+  4: release the semaphore acquired on this open file.
+
+read sends the two-u32 flush notice {0, 0} to the selected avcsync client
+and returns zero. write returns zero; the daemon uses the mmap allocation.
+These unusual read/write semantics match the stock file_operations.
+
+/dev/avcsync
+-----------
+Each open has a separate queue. ioctl 1000 takes two u32 values:
+{maximum messages, payload capacity in bytes}. The allocation also includes
+one length byte per message and one unused byte. The message limit must be
+1..8000, payload capacity 0..8000, and total capacity at most 8192 bytes.
+pantech_server uses {64, 512}. A second initialization returns -EEXIST.
+
+ioctl 1001 copies the u32 client identifier to the argument. The low byte
+is a slot and the high 16 bits are an open generation, matching stock.
+write enqueues one message of at most 128 bytes. A full queue returns
+-EAGAIN. read returns one message; a short read discards its remainder.
+Blocking reads wait for data or a signal. Closing from the opener's process
+wakes blocked readers with -EBADF. poll reports POLLOUT|POLLWRNORM and adds
+POLLIN|POLLRDNORM when messages are available, as in stock.
+
+Deliberate safety differences
+-----------------------------
+Mappings cannot select arbitrary offsets or exceed the dedicated page.
+The page tail contains no unrelated kernel data. Queue lookup and enqueue
+are protected against concurrent close. Unmatched unlock and repeated lock
+on the same open file are rejected; final close releases its held semaphore.
+O_NONBLOCK reads return -EAGAIN when empty. Unknown ioctls are rejected.
+No flash, persistent storage, dump mode or security policy is changed.
+
+Primary binary evidence (stock Image virtual base c0008000)
+---------------------------------------------------------
+c08453fc..c0845b10: avcsync close/flush/open/ioctl/poll/write/read/queue.
+c0846580..c084688c: avclog open/close/write/read/mmap/ioctl.
+c113f1cc: avclog initialization, 1024-byte coherent DMA allocation.
+c12ff3b8: stock avclog file_operations (read triggers a flush notice).
+libsky_avclog.so 0x810: sky_avclog_init maps 1024 bytes, header +0,
+buffer state +16, record area +32; missing device leads to memset(NULL).
+pantech_server 0x882c: queue {64,512}, ioctls 1000/1001, avclog ioctls 0/1,
+then read eight-byte notices and pass them to avclog_write_daemon.
+
+The stock audit_printk_skb calls avclog_write using pantech_get_avc state.
+The update semantics of that vendor state have not been established, so
+this implementation does not invent an audit producer or alter audit policy.
+Mapping lifetime follows include/asm-generic/dma-mapping-common.h and the
+kernel DMA API documentation:
+https://www.kernel.org/doc/html/latest/core-api/dma-api.html
