@@ -84,6 +84,15 @@ config MACH_APQ8084_EF67
 	help
 	  Support Pantech EF67 (IM-A930S/L) hardware and device trees.
 
+config EF67_CRASH_LOG
+	bool "EF67S stock bootloader crash log handoff"
+	depends on MACH_APQ8084_EF67 && PRINTK
+	help
+	  Publish the kernel log buffer through the IM-A930S stock crash header
+	  and mark panic resets for its bootloader. Only the EF67S board is
+	  supported. This diagnostic option does not enable RAM or USB dump
+	  modes; prepare a collection path before testing a diagnostic image.
+
 config ARCH_MPQ8092
 	bool "MPQ8092"
 	select REGULATOR

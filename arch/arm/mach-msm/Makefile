@@ -60,6 +60,7 @@ obj-$(CONFIG_ARCH_FSM9900) += rfic-fsm9900.o bbif-fsm9900.o
 obj-$(CONFIG_QPNP_BMS) += bms-batterydata.o bms-batterydata-desay.o
 obj-$(CONFIG_QPNP_BMS) += bms-batterydata-oem.o bms-batterydata-qrd-4v35-2000mah.o bms-batterydata-qrd-4v2-1300mah.o
 obj-$(CONFIG_ARCH_APQ8084) += board-8084.o
+obj-$(CONFIG_EF67_CRASH_LOG) += ef67-crash-log.o
 ifeq ($(CONFIG_MACH_APQ8084_EF67),y)
 obj-$(CONFIG_ARCH_APQ8084) += board-8084-ef67-gpiomux.o
 else

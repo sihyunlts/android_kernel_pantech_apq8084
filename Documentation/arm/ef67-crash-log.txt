@@ -1,0 +1,77 @@
+EF67S diagnostic crash log handoff
+=================================
+
+CONFIG_EF67_CRASH_LOG is an optional IM-A930S diagnostic facility. Normal
+ef67_defconfig leaves it disabled. Merge arch/arm/configs/ef67_diagnostic.config
+into an ef67_defconfig build and run olddefconfig to enable it with a 512 KiB
+printk ring. On the tested stock fastboot path, image-header command-line
+options (including initcall_debug) were absent from the running kernel
+command line; do not assume such options reached the kernel.
+
+The handoff is installed immediately after msm_smem_init, before the board's
+GPIO, power and clock initialization. It cannot record failures preceding
+that point, power loss, or a reset that destroys DDR contents. A successful
+build does not prove that the stock bootloader will collect a particular reset.
+
+ABI evidence
+------------
+The IM-A930S S0226114 decompressed stock kernel was used to verify:
+
+  crash_buf_header_init      0xc016af5c: SMEM_ID_VENDOR2 (136)
+  get_pantech_klog_dump_address 0xc016f5e0: 32-bit physical address/size at +8/+12
+  pantech_apanic_init        0xc110ad38: logger fields at +0x10 through +0x30
+  apanic_logging            0xc016ac8c: 512-byte MMU script at +0x34,
+                                      length at +0x234, magic 0xdaeddaed
+  pantech_sys_reset_reason_init 0xc0169de0: IMEM magic 0xdead0525,
+                                      pending/abnormal reason 0xda000031
+  panic                     0xc0a9cb30: Linux panic reason 0xda000011
+  msm_restart               call at 0xc0168858: normal reason 0xda0000f1
+
+IMEM is mapped from the qcom,msm-imem DT resource. The vendor magic and reset
+reason occupy offsets 0xff8 and 0xffc, separate from CAF's restart_reason
+child at 0x65c. Bits 8 through 23 of the vendor reset word are preserved.
+Missing firmware memory, an unexpected magic, or a board-id other than
+<0x1a3b 3> disables the handoff. No SMEM allocation or new RAM carveout is made.
+
+The EF71 pantech_apanic.c and boot_dload_debug_target.c sources explain the
+producer/consumer relationship, but their header layout and IMEM constants
+are different. They must not replace the verified EF67 ABI.
+
+Collection
+----------
+The kernel publishes the ring address and size, clears stale Android logger
+pointers, and supplies the stock MMU script on panic. It does not create a
+filesystem or modify any persistent dump setting. The panic path flushes the
+ring out of CPU caches before marking the Linux reset reason.
+
+The EF67S S0226114 SBL1 boot_process_pantech_log_dumps at 0xf80295b4
+selects /sys_boot/skylog/ when RAM dump mode is off and /mmc1/skylog/ when
+it is on. With both RAM and USB dump modes off, the branch at 0xf80320f0
+returns before registering the full DDR dump. Internal log-only collection
+was verified on the IM-A930S; it does not require an external microSD.
+Existing skylog/logN contents may be replaced by the stock rotation logic.
+
+The installed stock pantech_server exposes the crash-only collection request
+through localreserved:pantech_debug_sock. Its packet is 548 bytes:
+
+  int32 cmd, param, param2, param3;
+  char param4[16];
+  int32 data_size;
+  char data[512];
+
+The EF67 request uses cmd 0x20002003, param 1, and zeroes otherwise. Success
+returns cmd 0x30000001, param 0, and the original command in param3. These
+values were checked in the installed EF67 binaries, not copied from EF71.
+The stock service copies the internal logs to /sdcard/skylog/corelog and
+cleans up the collected internal source logs. Collection was verified using
+an ephemeral ADB forward without root or installing a device-side helper.
+
+errlinux.txt contains binary printk records; retain the full ring for decoding.
+Live tests recovered a 512 KiB ring containing this kernel's version, the
+handoff-ready message, the panic and restart messages, then returned to stock
+Android. RAM and USB dump settings remained zero; no partition was flashed.
+
+Full DDR dump modes are separate: they can require several GiB and contain
+private memory. Do not enable them as part of log-only collection. If testing
+an external collection mode, check the firmware's filesystem support first;
+Android mounting an exFAT card does not prove SBL1 can write to it.

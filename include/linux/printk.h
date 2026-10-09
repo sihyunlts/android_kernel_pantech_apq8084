@@ -146,6 +146,10 @@ extern void wake_up_klogd(void);
 
 void log_buf_kexec_setup(void);
 void __init setup_log_buf(int early);
+#ifdef CONFIG_EF67_CRASH_LOG
+char *log_buf_addr_get(void);
+u32 log_buf_len_get(void);
+#endif
 void dump_stack_set_arch_desc(const char *fmt, ...);
 void dump_stack_print_info(const char *log_lvl);
 void show_regs_print_info(const char *log_lvl);

@@ -24,6 +24,7 @@
 #include <asm/mach/map.h>
 #include <asm/mach/arch.h>
 #include <mach/board.h>
+#include <mach/ef67-crash-log.h>
 #include <mach/gpiomux.h>
 #include <mach/msm_iomap.h>
 #include <mach/msm_memtypes.h>
@@ -101,6 +102,7 @@ void __init apq8084_init(void)
 	board_dt_populate(adata);
 
 	msm_smem_init();
+	ef67_crash_log_init();
 
 	if (socinfo_init() < 0)
 		pr_err("%s: socinfo_init() failed\n", __func__);

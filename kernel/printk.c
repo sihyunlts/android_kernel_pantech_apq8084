@@ -255,6 +255,18 @@ static char __log_buf[__LOG_BUF_LEN] __aligned(LOG_ALIGN);
 static char *log_buf = __log_buf;
 static u32 log_buf_len = __LOG_BUF_LEN;
 
+#ifdef CONFIG_EF67_CRASH_LOG
+char *log_buf_addr_get(void)
+{
+	return log_buf;
+}
+
+u32 log_buf_len_get(void)
+{
+	return log_buf_len;
+}
+#endif
+
 /* cpu currently holding logbuf_lock */
 static volatile unsigned int logbuf_cpu = UINT_MAX;
 
