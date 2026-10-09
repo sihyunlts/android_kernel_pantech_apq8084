@@ -5925,6 +5925,9 @@ static struct clk_lookup apq_clocks_8084[] = {
 	CLK_LOOKUP("measure",	measure_clk.c,	"debug"),
 	/* NFC */
 	CLK_LOOKUP("ref_clk",            bb_clk2_a_pin.c, "3-000e"),
+#ifdef CONFIG_MACH_APQ8084_EF67
+	CLK_LOOKUP("xo",                 bb_clk2_pin.c, "pn547"),
+#endif
 	/* RPM clocks */
 	CLK_LOOKUP("bus_clk", snoc_clk.c, ""),
 	CLK_LOOKUP("bus_clk", pnoc_clk.c, ""),
