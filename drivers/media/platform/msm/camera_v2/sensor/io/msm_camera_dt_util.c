@@ -354,32 +354,32 @@ int msm_camera_get_dt_power_setting_data(struct device_node *of_node,
 	const char *seq_name = NULL;
 	uint32_t *array = NULL;
 	struct msm_sensor_power_setting *ps;
-
-	struct msm_sensor_power_setting *power_setting;
-	uint16_t *power_setting_size, size = 0;
-	bool need_reverse = 0;
+	struct msm_sensor_power_setting *power_down_setting;
 
 	if (!power_info)
 		return -EINVAL;
 
-	power_setting = power_info->power_setting;
-	power_setting_size = &power_info->power_setting_size;
+	power_info->power_setting = NULL;
+	power_info->power_setting_size = 0;
+	power_info->power_down_setting = NULL;
+	power_info->power_down_setting_size = 0;
 
 	count = of_property_count_strings(of_node, "qcom,cam-power-seq-type");
-	*power_setting_size = count;
 
 	CDBG("%s qcom,cam-power-seq-type count %d\n", __func__, count);
 
-	if (count <= 0)
+	if (!count || count == -EINVAL)
 		return 0;
+	if (count < 0)
+		return count;
+	if (count > USHRT_MAX)
+		return -EINVAL;
 
 	ps = kzalloc(sizeof(*ps) * count, GFP_KERNEL);
 	if (!ps) {
 		pr_err("%s failed %d\n", __func__, __LINE__);
 		return -ENOMEM;
 	}
-	power_setting = ps;
-	power_info->power_setting = ps;
 
 	for (i = 0; i < count; i++) {
 		rc = of_property_read_string_index(of_node,
@@ -510,44 +510,26 @@ int msm_camera_get_dt_power_setting_data(struct device_node *of_node,
 	}
 	kfree(array);
 
-	size = *power_setting_size;
-
-	if (NULL != ps && 0 != size)
-		need_reverse = 1;
-
-	power_info->power_down_setting =
-		kzalloc(sizeof(*ps) * size, GFP_KERNEL);
-
-	if (!power_info->power_down_setting) {
+	power_down_setting = kzalloc(sizeof(*ps) * count, GFP_KERNEL);
+	if (!power_down_setting) {
 		pr_err("%s failed %d\n", __func__, __LINE__);
 		rc = -ENOMEM;
 		goto ERROR1;
 	}
 
-	memcpy(power_info->power_down_setting,
-		ps, sizeof(*ps) * size);
+	for (i = 0; i < count; i++)
+		power_down_setting[i] = ps[count - i - 1];
 
-	power_info->power_down_setting_size = size;
-
-	if (need_reverse) {
-		int c, end = size - 1;
-		struct msm_sensor_power_setting power_down_setting_t;
-		for (c = 0; c < size/2; c++) {
-			power_down_setting_t =
-				power_info->power_down_setting[c];
-			power_info->power_down_setting[c] =
-				power_info->power_down_setting[end];
-			power_info->power_down_setting[end] =
-				power_down_setting_t;
-			end--;
-		}
-	}
-	return rc;
+	/* Publish only complete settings; errors retain no freed pointers. */
+	power_info->power_setting = ps;
+	power_info->power_setting_size = count;
+	power_info->power_down_setting = power_down_setting;
+	power_info->power_down_setting_size = count;
+	return 0;
 ERROR2:
 	kfree(array);
 ERROR1:
 	kfree(ps);
-	power_setting_size = 0;
 	return rc;
 }
 
@@ -835,23 +817,26 @@ int msm_camera_get_dt_vreg_data(struct device_node *of_node,
 	struct camera_vreg_t **cam_vreg, int *num_vreg)
 {
 	int rc = 0, i = 0;
-	uint32_t count = 0;
+	int count;
 	uint32_t *vreg_array = NULL;
 	struct camera_vreg_t *vreg = NULL;
+
+	*cam_vreg = NULL;
+	*num_vreg = 0;
 
 	count = of_property_count_strings(of_node, "qcom,cam-vreg-name");
 	CDBG("%s qcom,cam-vreg-name count %d\n", __func__, count);
 
-	if (!count)
+	if (!count || count == -EINVAL)
 		return 0;
+	if (count < 0)
+		return count;
 
-	vreg = kzalloc(sizeof(*vreg) * count, GFP_KERNEL);
+	vreg = kcalloc(count, sizeof(*vreg), GFP_KERNEL);
 	if (!vreg) {
 		pr_err("%s failed %d\n", __func__, __LINE__);
 		return -ENOMEM;
 	}
-	*cam_vreg = vreg;
-	*num_vreg = count;
 	for (i = 0; i < count; i++) {
 		rc = of_property_read_string_index(of_node,
 			"qcom,cam-vreg-name", i,
@@ -864,7 +849,7 @@ int msm_camera_get_dt_vreg_data(struct device_node *of_node,
 		}
 	}
 
-	vreg_array = kzalloc(sizeof(uint32_t) * count, GFP_KERNEL);
+	vreg_array = kcalloc(count, sizeof(*vreg_array), GFP_KERNEL);
 	if (!vreg_array) {
 		pr_err("%s failed %d\n", __func__, __LINE__);
 		rc = -ENOMEM;
@@ -908,12 +893,13 @@ int msm_camera_get_dt_vreg_data(struct device_node *of_node,
 	}
 
 	kfree(vreg_array);
-	return rc;
+	*cam_vreg = vreg;
+	*num_vreg = count;
+	return 0;
 ERROR2:
 	kfree(vreg_array);
 ERROR1:
 	kfree(vreg);
-	*num_vreg = 0;
 	return rc;
 }
 

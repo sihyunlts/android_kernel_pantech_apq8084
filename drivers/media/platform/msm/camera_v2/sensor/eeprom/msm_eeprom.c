@@ -629,7 +629,7 @@ static int msm_eeprom_get_dt_data(struct msm_eeprom_ctrl_t *e_ctrl)
 		power_info->cam_vreg, power_info->num_vreg,
 		power_info);
 	if (rc < 0)
-		goto ERROR1;
+		goto ERROR2;
 
 	power_info->gpio_conf = kzalloc(sizeof(struct msm_camera_gpio_conf),
 					GFP_KERNEL);
@@ -677,8 +677,8 @@ ERROR3:
 	kfree(power_info->gpio_conf);
 ERROR2:
 	kfree(power_info->cam_vreg);
-ERROR1:
 	kfree(power_info->power_setting);
+	kfree(power_info->power_down_setting);
 	return rc;
 }
 
