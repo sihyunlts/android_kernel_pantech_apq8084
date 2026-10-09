@@ -134,6 +134,11 @@
 			interrupt-parent = <&msmgpio>;
 			interrupts = <0x54 0x00>;
 			idex,irq-gpio = <&msmgpio 0x54 0>;
+			fpc,power-gpio = <&msmgpio 127 0>;
+			fpc,reset-gpio = <&msmgpio 129 0>;
+			vddio-supply = <&pma8084_l9>;
+			vdd-supply = <&pma8084_l19>;
+			vddaux-supply = <&pma8084_l26>;
 			#interrupt-names = "irq_gpio";
 			idex,gpios = <&msmgpio 0x85 0x00 &msmgpio 0x83 0x00 &msmgpio 0x82 0x00>;
 			idex,cs-gpios = <&msmgpio 0x84 0>;

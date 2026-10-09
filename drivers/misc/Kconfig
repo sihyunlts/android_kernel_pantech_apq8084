@@ -630,6 +630,13 @@ config APQ8084_DOCKING_STATION
 	  This option enables support for the USB and Ethernet ports found on
 	  the QTI APQ8084 Docking Station.
 
+config FPC_BTP_EF67
+	tristate "Pantech EF67 FPC1021 fingerprint capture"
+	depends on SPI && OF_GPIO && REGULATOR && ARCH_MSM
+	help
+	  Provides the fpc_btp image capture interface for the EF67
+	  fingerprint sensor.
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"

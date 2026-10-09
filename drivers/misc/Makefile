@@ -66,3 +66,4 @@ obj-y				+= qcom/
 obj-$(CONFIG_DRV2603_EF67)		+= drv2603-ef67.o
 obj-$(CONFIG_NFC_PN547_EF67)	+= pn547-ef67.o
 obj-$(CONFIG_EF67_AVCLOG)		+= ef67-avclog.o
+obj-$(CONFIG_FPC_BTP_EF67)		+= fpc-btp-ef67.o
