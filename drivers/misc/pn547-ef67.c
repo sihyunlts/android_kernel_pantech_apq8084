@@ -73,6 +73,8 @@ static void ef67_pn547_enable_irq(struct ef67_pn547 *nfc)
 {
 	unsigned long flags;
 
+	/* Finish the previous handler before resetting this read's readiness. */
+	synchronize_irq(nfc->irq);
 	atomic_set(&nfc->irq_pending, 0);
 	spin_lock_irqsave(&nfc->irq_lock, flags);
 	nfc->irq_enabled = true;
