@@ -119,8 +119,10 @@ int msm_flash_led_init(struct msm_led_flash_ctrl_t *fctrl)
 	if (fctrl->flash_device_type == MSM_CAMERA_PLATFORM_DEVICE) {
 		rc = fctrl->flash_i2c_client->i2c_func_tbl->i2c_util(
 			fctrl->flash_i2c_client, MSM_CCI_INIT);
-		if (rc < 0)
+		if (rc < 0) {
 			pr_err("cci_init failed\n");
+			return rc;
+		}
 	}
 
 	rc = msm_camera_request_gpio_table(
@@ -128,6 +130,9 @@ int msm_flash_led_init(struct msm_led_flash_ctrl_t *fctrl)
 		power_info->gpio_conf->cam_gpio_req_tbl_size, 1);
 	if (rc < 0) {
 		pr_err("%s: request gpio failed\n", __func__);
+		if (fctrl->flash_device_type == MSM_CAMERA_PLATFORM_DEVICE)
+			fctrl->flash_i2c_client->i2c_func_tbl->i2c_util(
+				fctrl->flash_i2c_client, MSM_CCI_RELEASE);
 		return rc;
 	}
 

@@ -1,0 +1,93 @@
+EF67S camera power support
+=========================
+
+Target: IM-A930S, stock firmware S0226114.
+
+This restores the stock camera GPIO mappings and the EEPROM power-sequence
+name sensor_gpio_cam0_avdd_en. It does not implement sensor imaging, OIS or
+camera HAL compatibility. DTS voltages, regulators, GPIOs and delays are
+unchanged.
+
+Stock GPIO sequence ABI
+----------------------
+
+msm_camera_init_gpio_pin_tbl at 0xc06e2714 allocates 46 bytes: fifteen u16
+GPIO numbers followed by fifteen validity bytes and alignment padding.
+msm_camera_power_up/down accept IDs 0 through 13. Existing IDs 0 through 8
+are preserved; the additional slots are:
+
+  ID  Name                         DT property      Stock GPIO
+   9  SENSOR_GPIO_CAM0_SVDD0_EN    qcom,svdd0-en          126
+  10  SENSOR_GPIO_CAM0_SVDD1_EN    (no DT mapping)
+  11  SENSOR_GPIO_CAM0_AVDD_EN     qcom,avdd-en           125
+  12  SENSOR_GPIO_CAM1_SVDD_EN     qcom,svdd1-en           80
+  13  SENSOR_GPIO_CAM1_AVDD_EN     qcom,avdd1-en           83
+
+The front qcom,svdd1-en property selects ID 12, not ID 10. Stock pin-table
+property literals are at 0xc06e2d18 through 0xc06e2d9c. The restored table
+also includes stock qcom,gpio-vio, qcom,gpio-vaf and qcom,gpio-af-pwdm.
+
+The EEPROM parser at 0xc06e1dc0 compares sensor_gpio_cam0_avdd_en via the
+literal at 0xc06e22ac and stores ID 11 at 0xc06e1fe0. DT GPIO configuration
+0/1 is converted to GPIO_OUT_LOW/HIGH (0/2), as in stock.
+
+EEPROM power sequence
+---------------------
+
+  1. Enable L17 cam_rvana at 2.85 V, 80 mA load; wait 1 ms.
+  2. Enable LVS4 cam_rvio; wait 1 ms.
+  3. Drive GPIO125 high; wait 3 ms.
+  4. Drive GPIO36 high; wait 3 ms.
+  5. Enable MCLK at 24 MHz on GPIO15; wait 3 ms.
+
+LVS4 is a switch supply; its DT voltage 0 does not request a new voltage.
+This code does not program or infer the external AVDD/SVDD output voltage.
+
+After reading, disable MCLK, drive GPIO36 and GPIO125 low, then disable
+LVS4 and L17, keeping the delays of the reversed steps. Explicit sensor
+library shutdown sequences retain their supplied output levels.
+
+Intentional differences from stock
+---------------------------------
+
+Stock shutdown at 0xc06e3550 through 0xc06e3564 uses gpio_num[config_val]
+as the output value. In the stock EEPROM shutdown, config_val remains 2;
+slot 2 is unmapped and zero, so the pins happen to go low. A requested low
+(0), however, indexes slot 0 containing GPIO36 and would drive high.
+Use config_val directly and explicitly set generated GPIO shutdown steps
+low. The normal EEPROM shutdown levels match stock without relying on an
+unmapped slot being zero.
+
+Validate power-up indices, GPIO mappings and levels before enabling
+supplies. GPIO requests are transactional via gpio_request_array; errors
+stop startup before supplies are enabled. Regulator, clock, mux and CCI
+failures unwind completed steps in reverse order. A mux configuration
+failure releases its own initialization. Fix the CCI failure path's double
+reference-count decrement and release CCI after a flash GPIO request fails.
+
+Verification and remaining work
+-------------------------------
+
+Compared all twelve stock GPIO property literals/sequence IDs and the
+EEPROM AVDD parser ID. Compared EEPROM, rear and front DT power properties,
+GPIO numbers and regulator targets against the stock DT: all match.
+
+Executed extracted C functions with hardware stubs to check parsing,
+allocation failures, GPIO request rollback, regulator/clock/CCI failures,
+invalid input rejection and explicit/generated shutdown order and levels.
+The actual mux helper also passed initialization/configuration failure
+checks. EF67 zImage/dtbs and the common camera subtree with EF67 disabled
+built successfully.
+
+No hardware boot or EEPROM read has been verified for this change. Sensor
+library power sequences, cam_r* regulator ID translation, IMX214/S5K6B2YX,
+OIS and userspace camera ABI compatibility still need separate work.
+
+References:
+  https://www.kernel.org/doc/Documentation/gpio/gpio-legacy.txt
+  drivers/gpio/gpiolib.c in this tree
+  S0226114 stock kernel Image and device tree
+
+The VegaDevTeam msm8974 IMX214 extension also has camera power GPIO IDs,
+but its header omits flash slots 7/8. Its numeric ABI cannot be copied to
+EF67S; the mappings above follow the EF67S stock binary.

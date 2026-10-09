@@ -107,6 +107,12 @@ enum msm_sensor_power_seq_gpio_t {
 	SENSOR_GPIO_VAF,
 	SENSOR_GPIO_FL_EN,
 	SENSOR_GPIO_FL_NOW,
+	/* EF67S stock power-sequence ABI: do not reorder these entries. */
+	SENSOR_GPIO_CAM0_SVDD0_EN,
+	SENSOR_GPIO_CAM0_SVDD1_EN,
+	SENSOR_GPIO_CAM0_AVDD_EN,
+	SENSOR_GPIO_CAM1_SVDD_EN,
+	SENSOR_GPIO_CAM1_AVDD_EN,
 	SENSOR_GPIO_MAX,
 };
 

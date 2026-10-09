@@ -326,8 +326,7 @@ int32_t msm_sensor_driver_probe(void *setting)
 	struct msm_sensor_power_setting     *power_down_setting = NULL;
 	struct msm_camera_slave_info        *camera_info = NULL;
 	struct msm_camera_power_ctrl_t      *power_info = NULL;
-	int c, end;
-	struct msm_sensor_power_setting     power_down_setting_t;
+	int c;
 	unsigned long mount_pos = 0;
 
 	/* Validate input parameters */
@@ -421,7 +420,7 @@ int32_t msm_sensor_driver_probe(void *setting)
 	}
 	/*DOWN*/
 	size_down = slave_info->power_setting_array.size_down;
-	if (!size_down)
+	if (!size_down || !slave_info->power_setting_array.power_down_setting)
 		size_down = size;
 	/* Allocate memory for power down setting */
 	power_down_setting =
@@ -443,25 +442,12 @@ int32_t msm_sensor_driver_probe(void *setting)
 			goto FREE_POWER_DOWN_SETTING;
 		}
 	} else {
-		pr_err("failed: no power_down_setting");
-		if (copy_from_user(power_down_setting,
-			(void *)slave_info->power_setting_array.
-						power_setting,
-			sizeof(*power_down_setting) * size_down)) {
-			pr_err("failed: copy_from_user");
-			rc = -EFAULT;
-			goto FREE_POWER_DOWN_SETTING;
+		/* Generate shutdown from the already copied startup sequence. */
+		for (c = 0; c < size_down; c++) {
+			power_down_setting[c] = power_setting[size_down - c - 1];
+			if (power_down_setting[c].seq_type == SENSOR_GPIO)
+				power_down_setting[c].config_val = GPIO_OUT_LOW;
 		}
-
-		/*reverce*/
-		end = size_down - 1;
-		for (c = 0; c < size_down/2; c++) {
-			power_down_setting_t = power_down_setting[c];
-			power_down_setting[c] = power_down_setting[end];
-			power_down_setting[end] = power_down_setting_t;
-			end--;
-		}
-
 	}
 
 	/* Print power setting */

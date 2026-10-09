@@ -191,8 +191,9 @@ struct msm_gpio_set_tbl {
 };
 
 struct msm_camera_gpio_num_info {
-	uint16_t gpio_num[10];
-	uint8_t valid[10];
+	/* EF67S stock layout includes GPIO sequence slots 0 through 13. */
+	uint16_t gpio_num[15];
+	uint8_t valid[15];
 };
 
 struct msm_camera_gpio_conf {

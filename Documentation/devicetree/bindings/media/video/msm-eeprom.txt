@@ -54,6 +54,11 @@ Required properties:
     time in ms.
 
 Optional properties:
+- qcom,avdd-en : on EF67, index into gpios for CAM0_AVDD_EN. The
+    sensor_gpio_cam0_avdd_en power-sequence value selects this pin (stock
+    sequence ID 11). GPIO configuration values in DT are 0 for low and 1
+    for high. Generated power-down sequences reverse the power-up order
+    and drive GPIO steps low, retaining each step's delay.
 - qcom,pageen%d : number %d page enable reg size, start address, address type,
     data, data type, delay in ms. size 0 stand for not used.
 - cam_vdig-supply : should contain regulator to be used for the digital vdd.

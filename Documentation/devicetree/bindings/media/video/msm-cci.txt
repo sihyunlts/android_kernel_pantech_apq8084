@@ -115,6 +115,13 @@ Optional properties:
 - qcom,gpio-vdig : should contain index to gpio used by sensors digital vreg enable
 - qcom,gpio-vaf : should contain index to gpio used by sensors af vreg enable
 - qcom,gpio-af-pwdm : should contain index to gpio used by sensors af pwdm_n
+- qcom,svdd0-en : EF67 rear supply enable, index into gpios; sequence ID 9
+- qcom,avdd-en : EF67 rear analog supply enable, index into gpios; ID 11
+- qcom,svdd1-en : EF67 front supply enable, index into gpios; ID 12
+- qcom,avdd1-en : EF67 front analog supply enable, index into gpios; ID 13
+    These IDs match EF67S stock. ID 10 is reserved for CAM0_SVDD1_EN and
+    is not selected by qcom,svdd1-en. The rear/front DT pin mappings alone
+    do not supply the sensor library's power sequence.
 - qcom,gpio-req-tbl-num : should contain index to gpios specific to this sensor
 - qcom,gpio-req-tbl-flags : should contain direction of gpios present in
     qcom,gpio-req-tbl-num property (in the same order)

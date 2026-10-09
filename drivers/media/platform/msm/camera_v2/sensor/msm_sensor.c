@@ -73,6 +73,7 @@ static int32_t msm_camera_get_power_settimgs_from_sensor_lib(
 	kzalloc(sizeof(*ps) * size, GFP_KERNEL);
 	if (!power_info->power_down_setting) {
 		pr_err("%s failed %d\n", __func__, __LINE__);
+		rc = -ENOMEM;
 		goto FREE_UP;
 	}
 	memcpy(power_info->power_down_setting,
@@ -92,11 +93,18 @@ static int32_t msm_camera_get_power_settimgs_from_sensor_lib(
 				power_down_setting_t;
 			end--;
 		}
+		for (c = 0; c < size; c++)
+			if (power_info->power_down_setting[c].seq_type ==
+				SENSOR_GPIO)
+				power_info->power_down_setting[c].config_val =
+					GPIO_OUT_LOW;
 	}
 
 	return 0;
 FREE_UP:
 	kfree(power_info->power_setting);
+	power_info->power_setting = NULL;
+	power_info->power_setting_size = 0;
 FAILED_1:
 	return rc;
 }
