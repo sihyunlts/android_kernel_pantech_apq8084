@@ -3738,6 +3738,13 @@ static int smb135x_charger_probe(struct i2c_client *client,
 	rc = smb135x_masked_write(chip, CMD_CHG_REG, CMD_CHG_EN | OTG_EN, 0);
 	if (rc)
 		return rc;
+	/* Own the input state before the first battery check can release it. */
+	rc = smb135x_path_suspend(chip, USB, BATTERY, true);
+	if (rc)
+		return rc;
+	rc = smb135x_path_suspend(chip, DC, BATTERY, true);
+	if (rc)
+		return rc;
 #endif
 
 	rc = smb_parse_dt(chip);
