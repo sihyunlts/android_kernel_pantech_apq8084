@@ -44,7 +44,9 @@ struct ef67_fpc {
 	u8 *images;
 	u8 *spi_buffer;
 	u8 adc[19];
+	u8 capture_adc[19];
 	unsigned int capture_mode;
+	unsigned int active_capture_mode;
 	unsigned int threshold;
 	unsigned int frames_captured;
 	unsigned int frames_stored;
@@ -53,7 +55,6 @@ struct ef67_fpc {
 	unsigned int capture_generation;
 	size_t available;
 	size_t read_offset;
-	int error;
 	int power_gpio;
 	int reset_gpio;
 	int irq_gpio;
@@ -208,10 +209,10 @@ static int ef67_fpc_setup(struct ef67_fpc *fpc)
 		ret = ef67_fpc_write_register(fpc, 0x8c, 2, 1);
 	if (!ret)
 		ret = ef67_fpc_write_register(fpc, 0xa0,
-				(fpc->adc[1] << 8) | fpc->adc[0], 2);
+				(fpc->capture_adc[1] << 8) | fpc->capture_adc[0], 2);
 	if (!ret)
 		ret = ef67_fpc_write_register(fpc, 0xa8,
-				(fpc->adc[2] << 8) | fpc->adc[3], 2);
+				(fpc->capture_adc[2] << 8) | fpc->capture_adc[3], 2);
 	if (!ret)
 		ret = ef67_fpc_write_register(fpc, 0xd8, 0x50, 1);
 	if (!ret)
@@ -225,7 +226,7 @@ static int ef67_fpc_finger_count(struct ef67_fpc *fpc)
 	int ret;
 
 	ret = ef67_fpc_write_register(fpc, 0xa0,
-				(fpc->adc[1] << 8) | fpc->adc[0], 2);
+				(fpc->capture_adc[1] << 8) | fpc->capture_adc[0], 2);
 	if (!ret) {
 		ret = ef67_fpc_read_irq(fpc);
 		if (ret >= 0)
@@ -273,9 +274,9 @@ static void ef67_fpc_capture(struct work_struct *work)
 	unsigned int frame;
 	int ret = ef67_fpc_setup(fpc);
 
-	if (!ret && fpc->capture_mode == 1) {
+	if (!ret && fpc->active_capture_mode == 1) {
 		/* Subsequent attempts wait for release before accepting a new touch. */
-		if (!fpc->first_try) {
+		if (!ACCESS_ONCE(fpc->first_try)) {
 			for (;;) {
 				if (atomic_read(&fpc->cancel)) {
 					ret = -ECANCELED;
@@ -302,10 +303,12 @@ static void ef67_fpc_capture(struct work_struct *work)
 	started = jiffies;
 	for (frame = 0; !ret && frame < FPC_FRAME_COUNT; frame++) {
 		ret = ef67_fpc_write_register(fpc, 0xa0,
-			(fpc->adc[9 + frame] << 8) | fpc->adc[4 + frame], 2);
+			(fpc->capture_adc[9 + frame] << 8) |
+			fpc->capture_adc[4 + frame], 2);
 		if (!ret)
 			ret = ef67_fpc_write_register(fpc, 0xa8,
-				(fpc->adc[14 + frame] << 8) | fpc->adc[3], 2);
+				(fpc->capture_adc[14 + frame] << 8) |
+				fpc->capture_adc[3], 2);
 		if (!ret)
 			ret = ef67_fpc_command(fpc, 0xc0, 0x20);
 		if (ret)
@@ -328,7 +331,7 @@ static void ef67_fpc_capture(struct work_struct *work)
 		mutex_lock(&fpc->data_lock);
 		fpc->frames_captured++;
 		mutex_unlock(&fpc->data_lock);
-		if (fpc->capture_mode == 1) {
+		if (fpc->active_capture_mode == 1) {
 			ret = ef67_fpc_finger_count(fpc);
 			if (ret < 0)
 				break;
@@ -352,11 +355,12 @@ static void ef67_fpc_capture(struct work_struct *work)
 		wake_up_interruptible(&fpc->read_wait);
 	}
 	mutex_lock(&fpc->data_lock);
-	fpc->error = ret;
 	fpc->capture_time = jiffies_to_msecs(jiffies - started);
 	fpc->running = false;
 	fpc->complete = true;
 	mutex_unlock(&fpc->data_lock);
+	if (ret && ret != -ECANCELED)
+		dev_err(&fpc->spi->dev, "capture failed: %d\n", ret);
 	wake_up_interruptible(&fpc->read_wait);
 }
 
@@ -372,7 +376,6 @@ static void ef67_fpc_cancel(struct ef67_fpc *fpc)
 	fpc->read_offset = 0;
 	fpc->running = false;
 	fpc->complete = true;
-	fpc->error = -ECANCELED;
 	mutex_unlock(&fpc->data_lock);
 	wake_up_interruptible(&fpc->read_wait);
 }
@@ -498,7 +501,8 @@ static ssize_t ef67_fpc_read(struct file *file, char __user *buf,
 			break;
 		}
 		if (fpc->capture_generation != generation) {
-			ret = -ECANCELED;
+			/* End the old attempt without consuming the replacement capture. */
+			ret = 0;
 			break;
 		}
 		if (fpc->available) {
@@ -513,7 +517,8 @@ static ssize_t ef67_fpc_read(struct file *file, char __user *buf,
 			break;
 		}
 		if (fpc->complete) {
-			ret = fpc->error;
+			/* The stock interface reports capture completion as EOF. */
+			ret = 0;
 			break;
 		}
 		mutex_unlock(&fpc->data_lock);
@@ -540,12 +545,12 @@ static unsigned int ef67_fpc_poll(struct file *file, poll_table *wait)
 
 	poll_wait(file, &fpc->read_wait, wait);
 	mutex_lock(&fpc->data_lock);
-	if (fpc->available)
-		mask |= POLLIN | POLLRDNORM;
-	if (fpc->complete)
-		mask |= fpc->error ? POLLERR : POLLHUP;
 	if (fpc->removed)
-		mask |= POLLERR | POLLHUP;
+		mask = POLLERR | POLLHUP;
+	else if (fpc->available)
+		mask |= POLLIN | POLLRDNORM;
+	else if (fpc->complete)
+		mask = POLLHUP;
 	mutex_unlock(&fpc->data_lock);
 	return mask;
 }
@@ -571,11 +576,13 @@ static long ef67_fpc_ioctl(struct file *file, unsigned int command,
 		ret = ef67_fpc_reset(fpc);
 		if (ret)
 			break;
+		/* Apply one coherent setup per attempt; userspace may prepare the next. */
+		memcpy(fpc->capture_adc, fpc->adc, sizeof(fpc->capture_adc));
+		fpc->active_capture_mode = fpc->capture_mode;
 		mutex_lock(&fpc->data_lock);
 		fpc->frames_captured = 0;
 		fpc->frames_stored = 0;
 		fpc->finger_status = 0;
-		fpc->error = 0;
 		fpc->complete = false;
 		fpc->running = true;
 		mutex_unlock(&fpc->data_lock);
@@ -589,10 +596,8 @@ static long ef67_fpc_ioctl(struct file *file, unsigned int command,
 		ret = ef67_fpc_reset(fpc);
 		break;
 	case FPC_FIRST_TRY:
-		if (ACCESS_ONCE(fpc->running))
-			ret = -EBUSY;
-		else
-			fpc->first_try = !!arg;
+		/* Stock userspace updates this flag while a capture is active. */
+		ACCESS_ONCE(fpc->first_try) = !!arg;
 		break;
 	case FPC_NAVIGATION:
 	case 5001:
@@ -649,9 +654,7 @@ static ssize_t ef67_fpc_setup_store(struct device *dev,
 	    (index != 20 && value > 255))
 		return -EINVAL;
 	mutex_lock(&fpc->control);
-	if (ACCESS_ONCE(fpc->running))
-		ret = -EBUSY;
-	else if (index == 20)
+	if (index == 20)
 		fpc->capture_mode = value;
 	else
 		fpc->adc[index] = value;
