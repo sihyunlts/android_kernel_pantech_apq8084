@@ -47,7 +47,7 @@ struct mdss_mdp_cmd_ctx {
 	struct work_struct pp_done_work;
 	atomic_t pp_done_cnt;
 	struct mdss_panel_recovery recovery;
-	struct mdss_mdp_cmd_ctx *sync_ctx;	/* for left + right, partial update */
+	struct mdss_mdp_cmd_ctx *sync_ctx;	/* both halves of a split update */
 	bool idle_pc;
 };
 
@@ -581,8 +581,8 @@ static void mdss_mdp_cmd_set_sync_ctx(
 
 	ctx = (struct mdss_mdp_cmd_ctx *)ctl->priv_data;
 
-	if (!ctl->panel_data->panel_info.partial_update_enabled || !sctl) {
-		/* not partial or right only at partial update */
+	if (!sctl) {
+		/* single display or right-only partial update */
 		ctx->sync_ctx = NULL;
 		return;
 	}
@@ -635,7 +635,8 @@ static int mdss_mdp_cmd_set_stream_size(struct mdss_mdp_ctl *ctl)
  * notification is triggered at pingpong_done which will
  * signal timeline to release source buffer
  *
- * for left+right case, pingpong_done is enabled for both and
+ * Full updates on a split display also update both halves.
+ * For the left+right case, pingpong_done is enabled for both and
  * only the last pingpong_done should trigger the notification
  */
 int mdss_mdp_cmd_kickoff(struct mdss_mdp_ctl *ctl, void *arg)
@@ -651,10 +652,8 @@ int mdss_mdp_cmd_kickoff(struct mdss_mdp_ctl *ctl, void *arg)
 		return -ENODEV;
 	}
 
-	if (ctl->panel_data->panel_info.partial_update_enabled) {
-		/* sctl will be null for right only */
-		sctl = mdss_mdp_get_split_ctl(ctl);
-	}
+	/* Full split updates need both completions, just like partial updates. */
+	sctl = mdss_mdp_get_split_ctl(ctl);
 
 	if (sctl && (sctl->roi.w == 0 || sctl->roi.h == 0)) {
 		/* left update only, set ssctl to null */
@@ -890,4 +889,3 @@ int mdss_mdp_cmd_start(struct mdss_mdp_ctl *ctl)
 
 	return 0;
 }
-
