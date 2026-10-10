@@ -787,6 +787,17 @@ static struct msm_gpiomux_config ef67_nfc_configs[] __initdata = {
 	},
 };
 
+/* The stock gpio_switch probe sets GPIO9 to input, pull-up, 2mA. */
+static struct msm_gpiomux_config ef67_smart_cover_configs[] __initdata = {
+	{
+		.gpio = 9,
+		.settings = {
+			[GPIOMUX_ACTIVE] = &gpio_in_2ma_pull_up,
+			[GPIOMUX_SUSPENDED] = &gpio_in_2ma_pull_up,
+		},
+	},
+};
+
 void __init apq8084_init_gpiomux(void)
 {
 	int rc;
@@ -832,4 +843,6 @@ void __init apq8084_init_gpiomux(void)
 			ARRAY_SIZE(ef67_pcie_configs));
 	msm_gpiomux_install(ef67_nfc_configs,
 			ARRAY_SIZE(ef67_nfc_configs));
+	msm_gpiomux_install(ef67_smart_cover_configs,
+			ARRAY_SIZE(ef67_smart_cover_configs));
 }

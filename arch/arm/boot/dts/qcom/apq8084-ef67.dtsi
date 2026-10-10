@@ -191,20 +191,27 @@
 	ef67_gpio_switch: gpio_switch {
 		compatible = "gpio_switch";
 
-		ef67_smart_cover: smart_cover {
-			label = "smart_cover";
-			debounce_time = <0x0a>;
-			gpios = <0x09>;
-			flag = <0x01>;
-			event_mode = <0x00>;
-		};
-
 		ef67_touch_pen_detection: touch_pen_detection {
 			label = "touch_pen_detection";
 			debounce_time = <0x0a>;
 			gpios = <0x4f>;
 			flag = <0x01>;
 			event_mode = <0x01>;
+		};
+	};
+
+	ef67_smart_cover: smart_cover {
+		compatible = "gpio-keys";
+		input-name = "smart_cover";
+
+		cover {
+			label = "smart_cover";
+			/* Stock flag=1: GPIO low means SW_LID closed. */
+			gpios = <&msmgpio 9 1>;
+			linux,input-type = <5>; /* EV_SW */
+			linux,code = <0>; /* SW_LID */
+			debounce-interval = <10>;
+			gpio-key,wakeup;
 		};
 	};
 
