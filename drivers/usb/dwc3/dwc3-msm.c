@@ -33,6 +33,7 @@
 #include <linux/uaccess.h>
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
+#include <linux/usb/ef67.h>
 #include <linux/qpnp-misc.h>
 #include <linux/usb/msm_hsusb.h>
 #include <linux/usb/msm_ext_chg.h>
@@ -1740,6 +1741,7 @@ static int dwc3_msm_power_set_property_usb(struct power_supply *psy,
 				init = true;
 		}
 		mdwc->vbus_active = val->intval;
+		ef67_usb_vbus(!!val->intval);
 		break;
 	case POWER_SUPPLY_PROP_ONLINE:
 		mdwc->online = val->intval;

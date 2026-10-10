@@ -1,0 +1,85 @@
+EF67 stock USB service interface
+================================
+
+CONFIG_USB_ANDROID_EF67_MANAGER is limited to MACH_APQ8084_EF67 and the
+primary Android USB core. Other boards retain the existing CAF sysfs path.
+The shared function preparation helper now returns allocation/binding errors
+and clears partial lists, rather than reporting a partly prepared set as success.
+
+/dev/usb_device_mode is an exclusive root:root 0600 misc device. It accepts
+manager_on, carrier_mode|kor, supported domestic composition names,
+gadget_on/off, usb_cable_detach and the stock connection-event acknowledgments.
+Stock composition descriptors were recovered from IM-A930S S0226114's
+pantech_android_vid_pid table. Normal CAF mass storage, MTP, PTP, RNDIS,
+ADB and accessory/audio compositions are supported when their functions exist.
+The configuration string and bcdDevice also follow that stock table and
+force_reenumeration: MTP=0x0291, PTP=0x0292, other normal functions=0x0290.
+MTP/PTP Windows compatible-ID responses contain 40 bytes without ADB and
+64 bytes with ADB, including the second interface entry. Both stock request
+indices 4 and 5 return this descriptor; CAF's OS string is already identical.
+Unsupported factory, CDROM, carrier and composition requests return errors.
+No USB authentication, Android properties or SELinux rules are changed.
+
+Reads have six fields: carrier|state|composition|reconnect|block|enumeration.
+The state field carries either a UI mode change or a cable connection event;
+when both are queued, the mode is delivered first and the cable event next.
+Short buffers and copy failures retain the read snapshot;
+new events received during a copy remain queued. Poll acknowledges receipt
+of a requested composition, as the stock service does. Waiting for the service
+to finish changing Android properties instead would deadlock init's sysfs
+write against the same init property service. The receipt wait is bounded to
+30 seconds and is interrupted by service closure or driver removal. A driver
+reprobe waits for the old exclusive file to close (returns EBUSY while open),
+so that file cannot control a replacement device. New probes start with
+fresh manager state while retaining the live cable signal.
+
+The stock service selects a composition and authorizes its initial connection
+with gadget_on. A later composition change preserves prior authorization.
+Requests for the same active function set leave the connection intact;
+a disabled set requests usb_reconnect. Sysfs accepts reordered function names
+and the ffs alias for adb, then sends the stock canonical name to the service.
+Stock ADB is prepared with CAF FunctionFS without relying on ffs_aliases.
+Cable detach invalidates the composition and clears enumeration state;
+gadget_off retains the composition for a subsequent gadget_on. A service
+close invalidates its remembered composition as stock release does.
+USB cable presence is supplied by DWC3's PRESENT power-supply notification;
+USB CONFIGURED events come from the existing gadget work function; a first
+GET_DESCRIPTOR request supplies get_desc once per connection/composition.
+The controller disconnect callback also supplies a disconnect event, even
+with VBUS present, as the stock android_disconnect does. Events from a
+removed cable cannot subsequently report enumeration. The service relays
+USB_STATE uevents used by Android's MTP service, suppressing duplicates and
+CONNECTED after CONFIGURED until DISCONNECTED has been sent.
+
+usb_manager selects one of EF67S's seven stock UI modes: pc_mode, mtp_mode,
+ums_mode, charge_mode, field_mode, factory_mode and ptp_mode. Accessory USB
+compositions exist, but EF67S has no accessory_mode UI entry. usb_mdm_mode follows the stock
+0=allowed / nonzero=blocked event convention. A changed value notifies a ready
+service, which issues gadget_off/on in stock order; the attribute itself does
+not disconnect the gadget. Both Boolean attributes accept signed decimal
+integers and show 0/1 without a newline, as stock does. factory_mode stores
+factory-cable eligibility, as the stock attribute
+does; it does not itself request a factory connection or enable ADB. Automatic
+factory-cable switching and factory_adb_mode are not implemented.
+
+The protocol was compared with Pantech's GPL pantech_android.c supplied in
+the EF71 reference and the EF67 stock functions_store, read, write,
+force_reenumeration, android_setup and disconnect ARM code. It was also
+cross-checked with the EF63/MSM8974 Pantech USB implementation at:
+https://github.com/sky-vega-dev-team/kernel_pantech_msm8x74/blob/21f5e60a4b4d65066c8005b0f4d1e5b3a4cdf4e1/drivers/usb/gadget/pantech_android.c
+That source uses a controller-based bcdDevice, so EF67 values are taken from
+EF67S's binary instead. This restores the normal domestic stock-service ABI.
+It does not implement the complete stock factory/CDROM/carrier/multiple-
+configuration stack. Bounded waits, read retries and explicit failure errors
+are deliberate robustness differences.
+
+Validation compared all 15 normal composition rows including strings to the
+stock binary, and all four Windows responses byte-for-byte. Extracted current
+C functions exercised active/disabled same-set requests, aliases, detach,
+controller disconnect, enumeration ordering, read retries, duplicate uevents,
+stock Boolean parsing/output and service-driven blocking,
+initial configuration allocation failure and partial function allocation failure.
+Locks, scheduling and endpoints were substituted in host tests; these checks
+are not a device stability result. Both manager-enabled and ordinary CAF ARM
+translation units compile. No PHY, regulator, charging or voltage settings
+are changed by this implementation.

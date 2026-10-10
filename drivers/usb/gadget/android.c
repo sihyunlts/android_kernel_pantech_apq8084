@@ -229,6 +229,9 @@ static int usb_diag_update_pid_and_serial_num(uint32_t pid, const char *snum);
 #define STRING_MANUFACTURER_IDX		0
 #define STRING_PRODUCT_IDX		1
 #define STRING_SERIAL_IDX		2
+#ifdef CONFIG_USB_ANDROID_EF67_MANAGER
+#define STRING_CONFIG_IDX		3
+#endif
 
 static char manufacturer_string[256];
 static char product_string[256];
@@ -239,6 +242,9 @@ static struct usb_string strings_dev[] = {
 	[STRING_MANUFACTURER_IDX].s = manufacturer_string,
 	[STRING_PRODUCT_IDX].s = product_string,
 	[STRING_SERIAL_IDX].s = serial_string,
+#ifdef CONFIG_USB_ANDROID_EF67_MANAGER
+	[STRING_CONFIG_IDX].s = "",
+#endif
 	{  }			/* end of list */
 };
 
@@ -303,6 +309,13 @@ static void android_pm_qos_update_latency(struct android_dev *dev, int vote)
 	last_vote = vote;
 }
 
+#ifdef CONFIG_USB_ANDROID_EF67_MANAGER
+static bool ef67_usb_managed(struct android_dev *dev);
+static void ef67_usb_bus_state(struct android_dev *dev, int state);
+static ssize_t ef67_usb_request_functions(struct android_dev *dev,
+					const char *buffer, size_t count);
+#endif
+
 static void android_work(struct work_struct *data)
 {
 	struct android_dev *dev = container_of(data, struct android_dev, work);
@@ -340,6 +353,14 @@ static void android_work(struct work_struct *data)
 
 	if (pm_qos_vote != -1)
 		android_pm_qos_update_latency(dev, pm_qos_vote);
+
+#ifdef CONFIG_USB_ANDROID_EF67_MANAGER
+	if (ef67_usb_managed(dev)) {
+		if (uevent_envp)
+			ef67_usb_bus_state(dev, next_state);
+		return;
+	}
+#endif
 
 	if (uevent_envp) {
 		/*
@@ -2880,19 +2901,34 @@ functions_show(struct device *pdev, struct device_attribute *attr, char *buf)
 	return buff - buf;
 }
 
+static void android_clear_enabled_functions(struct android_dev *dev)
+{
+	struct android_configuration *conf;
+	struct android_usb_function_holder *holder;
+
+	list_for_each_entry(conf, &dev->configs, list_item) {
+		while (!list_empty(&conf->enabled_functions)) {
+			holder = list_first_entry(&conf->enabled_functions,
+				struct android_usb_function_holder, enabled_list);
+			holder->f->android_dev = NULL;
+			list_del(&holder->enabled_list);
+			kfree(holder);
+		}
+	}
+}
+
 static ssize_t
-functions_store(struct device *pdev, struct device_attribute *attr,
+functions_store_direct(struct device *pdev, struct device_attribute *attr,
 			       const char *buff, size_t size)
 {
 	struct android_dev *dev = dev_get_drvdata(pdev);
 	struct list_head *curr_conf = &dev->configs;
 	struct android_configuration *conf;
 	char *conf_str;
-	struct android_usb_function_holder *f_holder;
 	char *name;
 	char buf[256], *b;
 	char aliases[256], *a;
-	int err;
+	int err = 0;
 	int is_ffs;
 	int ffs_enabled = 0;
 
@@ -2903,19 +2939,7 @@ functions_store(struct device *pdev, struct device_attribute *attr,
 		return -EBUSY;
 	}
 
-	/* Clear previous enabled list */
-	list_for_each_entry(conf, &dev->configs, list_item) {
-		while (conf->enabled_functions.next !=
-				&conf->enabled_functions) {
-			f_holder = list_entry(conf->enabled_functions.next,
-					typeof(*f_holder),
-					enabled_list);
-			f_holder->f->android_dev = NULL;
-			list_del(&f_holder->enabled_list);
-			kfree(f_holder);
-		}
-		INIT_LIST_HEAD(&conf->enabled_functions);
-	}
+	android_clear_enabled_functions(dev);
 
 	strlcpy(buf, buff, sizeof(buf));
 	b = strim(buf);
@@ -2933,6 +2957,10 @@ functions_store(struct device *pdev, struct device_attribute *attr,
 		else
 			conf = alloc_android_config(dev);
 
+		if (IS_ERR(conf)) {
+			err = PTR_ERR(conf);
+			goto failed;
+		}
 		curr_conf = curr_conf->next;
 		while (conf_str) {
 			name = strsep(&conf_str, ",");
@@ -2953,16 +2981,13 @@ functions_store(struct device *pdev, struct device_attribute *attr,
 					continue;
 				err = android_enable_function(dev, conf, "ffs");
 				if (err)
-					pr_err("android_usb: Cannot enable ffs (%d)",
-									err);
-				else
-					ffs_enabled = 1;
+					goto failed;
+				ffs_enabled = 1;
 				continue;
 			}
 			err = android_enable_function(dev, conf, name);
 			if (err)
-				pr_err("android_usb: Cannot enable '%s' (%d)",
-							name, err);
+				goto failed;
 		}
 	}
 
@@ -2976,6 +3001,23 @@ functions_store(struct device *pdev, struct device_attribute *attr,
 	mutex_unlock(&dev->mutex);
 
 	return size;
+
+failed:
+	android_clear_enabled_functions(dev);
+	mutex_unlock(&dev->mutex);
+	return err;
+}
+
+static ssize_t functions_store(struct device *pdev,
+		struct device_attribute *attr, const char *buffer, size_t count)
+{
+#ifdef CONFIG_USB_ANDROID_EF67_MANAGER
+	struct android_dev *dev = dev_get_drvdata(pdev);
+
+	if (ef67_usb_managed(dev))
+		return ef67_usb_request_functions(dev, buffer, count);
+#endif
+	return functions_store_direct(pdev, attr, buffer, count);
 }
 
 static ssize_t enable_show(struct device *pdev, struct device_attribute *attr,
@@ -3058,6 +3100,10 @@ static ssize_t enable_store(struct device *pdev, struct device_attribute *attr,
 
 	return size;
 }
+
+#ifdef CONFIG_USB_ANDROID_EF67_MANAGER
+#include "android-ef67-manager.c"
+#endif
 
 static ssize_t pm_qos_show(struct device *pdev,
 			   struct device_attribute *attr, char *buf)
@@ -3257,6 +3303,14 @@ static int android_bind(struct usb_composite_dev *cdev)
 		return id;
 	strings_dev[STRING_SERIAL_IDX].id = id;
 	device_desc.iSerialNumber = id;
+#ifdef CONFIG_USB_ANDROID_EF67_MANAGER
+	if (!dev->pdata || !dev->pdata->usb_core_id) {
+		id = usb_string_id(cdev);
+		if (id < 0)
+			return id;
+		strings_dev[STRING_CONFIG_IDX].id = id;
+	}
+#endif
 
 	if (gadget_is_otg(cdev->gadget))
 		list_for_each_entry(conf, &dev->configs, list_item)
@@ -3300,17 +3354,22 @@ android_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *c)
 	req->complete = dev->setup_complete;
 	gadget->ep0->driver_data = cdev;
 
-	list_for_each_entry(conf, &dev->configs, list_item)
-		list_for_each_entry(f_holder,
-				    &conf->enabled_functions,
-				    enabled_list) {
-			f = f_holder->f;
-			if (f->ctrlrequest) {
-				value = f->ctrlrequest(f, cdev, c);
-				if (value >= 0)
-					break;
+#ifdef CONFIG_USB_ANDROID_EF67_MANAGER
+	value = ef67_usb_ctrlrequest(dev, cdev, c);
+#endif
+	if (value < 0) {
+		list_for_each_entry(conf, &dev->configs, list_item)
+			list_for_each_entry(f_holder,
+					    &conf->enabled_functions,
+					    enabled_list) {
+				f = f_holder->f;
+				if (f->ctrlrequest) {
+					value = f->ctrlrequest(f, cdev, c);
+					if (value >= 0)
+						break;
+				}
 			}
-		}
+	}
 
 	/* Special case the accessory function.
 	 * It needs to handle control requests before it is enabled.
@@ -3347,6 +3406,9 @@ static void android_disconnect(struct usb_composite_dev *cdev)
 
 	dev->connected = 0;
 	schedule_work(&dev->work);
+#ifdef CONFIG_USB_ANDROID_EF67_MANAGER
+	ef67_usb_disconnect(dev);
+#endif
 }
 
 static struct usb_composite_driver android_usb_driver = {
@@ -3632,6 +3694,16 @@ static int android_probe(struct platform_device *pdev)
 			PM_QOS_CPU_DMA_LATENCY, PM_QOS_DEFAULT_VALUE);
 	strlcpy(android_dev->pm_qos, "high", sizeof(android_dev->pm_qos));
 
+#ifdef CONFIG_USB_ANDROID_EF67_MANAGER
+	ret = ef67_usb_manager_init(android_dev);
+	if (ret) {
+		if (pdata && pdata->swfi_latency)
+			pm_qos_remove_request(&android_dev->pm_qos_req_dma);
+		usb_composite_unregister(&android_usb_driver);
+		goto err_probe;
+	}
+#endif
+
 	return ret;
 err_probe:
 	android_destroy_device(android_dev);
@@ -3665,6 +3737,9 @@ static int android_remove(struct platform_device *pdev)
 	}
 
 	if (dev) {
+#ifdef CONFIG_USB_ANDROID_EF67_MANAGER
+		ef67_usb_manager_cleanup(dev);
+#endif
 		android_destroy_device(dev);
 		if (pdata && pdata->swfi_latency)
 			pm_qos_remove_request(&dev->pm_qos_req_dma);

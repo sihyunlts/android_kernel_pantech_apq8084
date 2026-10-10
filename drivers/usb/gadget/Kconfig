@@ -885,6 +885,14 @@ config USB_G_ANDROID
 	  Each function can be configured and enabled/disabled
 	  dynamically from userspace through a sysfs interface.
 
+config USB_ANDROID_EF67_MANAGER
+	bool "EF67 stock USB manager interface"
+	depends on USB_G_ANDROID && MACH_APQ8084_EF67
+	help
+	  Provide the root-only usb_device_mode protocol used by the EF67
+	  stock USB service. The service selects normal USB compositions and
+	  authorizes gadget connection. Factory and CDROM modes are not provided.
+
 config USB_ANDROID_RNDIS_DWORD_ALIGNED
 	boolean "Use double word aligned"
 	depends on USB_G_ANDROID
