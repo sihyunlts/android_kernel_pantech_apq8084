@@ -334,8 +334,10 @@ static int32_t msm_actuator_move_focus(
 	int32_t rc = 0;
 	struct damping_params_t ringing_params_kernel;
 	int8_t sign_dir = move_params->sign_dir;
+#ifndef CONFIG_MACH_APQ8084_EF67
 	uint16_t step_boundary = 0;
 	uint16_t target_step_pos = 0;
+#endif
 	uint16_t target_lens_pos = 0;
 	int16_t dest_step_pos = move_params->dest_step_pos;
 	uint16_t curr_lens_pos = 0;
@@ -375,6 +377,17 @@ static int32_t msm_actuator_move_focus(
 	CDBG("curr_step_pos =%d dest_step_pos =%d curr_lens_pos=%d\n",
 		a_ctrl->curr_step_pos, dest_step_pos, curr_lens_pos);
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+	/* S0226114 moves to the requested step without region transitions. */
+	if (a_ctrl->curr_step_pos != dest_step_pos) {
+		target_lens_pos = a_ctrl->step_position_table[dest_step_pos];
+		a_ctrl->func_tbl->actuator_write_focus(a_ctrl, curr_lens_pos,
+			&ringing_params_kernel, sign_dir, target_lens_pos);
+		curr_lens_pos = target_lens_pos;
+		a_ctrl->curr_step_pos = dest_step_pos;
+		a_ctrl->valid_position = 1;
+	}
+#else
 	while (a_ctrl->curr_step_pos != dest_step_pos) {
 		step_boundary =
 			a_ctrl->region_params[a_ctrl->curr_region_index].
@@ -409,7 +422,13 @@ static int32_t msm_actuator_move_focus(
 		a_ctrl->valid_position = 1;
 	}
 
+#endif
 	move_params->curr_lens_pos = curr_lens_pos;
+#ifdef CONFIG_MACH_APQ8084_EF67
+	/* Stock skips the table transfer for the zero destination. */
+	if (!dest_step_pos)
+		goto reset_i2c_tbl;
+#endif
 	reg_setting.reg_setting = a_ctrl->i2c_reg_tbl;
 	reg_setting.data_type = a_ctrl->i2c_data_type;
 	reg_setting.size = a_ctrl->i2c_tbl_index;
@@ -419,6 +438,9 @@ static int32_t msm_actuator_move_focus(
 		pr_err("i2c write error:%d\n", rc);
 		return rc;
 	}
+#ifdef CONFIG_MACH_APQ8084_EF67
+reset_i2c_tbl:
+#endif
 	a_ctrl->i2c_tbl_index = 0;
 	CDBG("Exit\n");
 

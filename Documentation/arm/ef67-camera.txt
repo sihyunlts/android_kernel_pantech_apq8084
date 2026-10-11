@@ -147,5 +147,20 @@ DAC byte order and masked bits, per-entry address/data widths, the 0x2c0
 word write, write/poll separation, transport errors and address restore.
 The user confirms rear focus, colors, preview rate and OIS appear normal.
 Device logs contain no VFE ping-pong mismatch or lens-write/park failure.
-This does not verify all modes: the common focus-region/zero-position
-handling and the absent stock OIS control/info commands still differ.
+This does not verify all modes: stock OIS control/info commands are absent.
+
+Stock focus movement
+--------------------
+
+S0226114 msm_actuator_move_focus at 0xc06e6044 uses the requested target
+step directly and keeps the region index unchanged. It skips the table
+transfer when the target step is zero, then clears the table index.
+Restore this EF67 behavior; other machines retain region transitions and
+zero-target writes. Damping, unchanged-target checks and transport errors
+retain their existing handling.
+
+Extracted-function checks cover region-crossing moves, zero and unchanged
+targets, invalid directions/ranges and transport failures with EF67
+enabled and disabled. The user confirms focus, colors and OIS remain
+normal after this follow-up. All 195 captured focus moves return zero,
+with no image-buffer, lens initialization or move failure in the log.
