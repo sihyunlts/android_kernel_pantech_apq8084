@@ -39,6 +39,10 @@
 #define EF67_MXT_RESET		0
 #define EF67_MXT_CALIBRATE	2
 #define EF67_MXT_T100_UNSUPPRESS	2
+#define EF67_MXT_T100_FINGER	0x10
+#define EF67_MXT_T100_STYLUS	0x20
+#define EF67_MXT_T100_HOVER	0x40
+#define EF67_MXT_T100_GLOVE	0x50
 
 struct ef67_mxt_object {
 	u8 type;
@@ -396,7 +400,10 @@ static void ef67_mxt_report_touch(struct ef67_mxt *touch, const u8 *message)
 	if (id >= EF67_MXT_CONTACTS)
 		return;
 	if (!(message[1] & 0x80) || event == 3 || event == 5 ||
-	    (type != 0x10 && type != 0x20 && type != 0x50) ||
+	    (type != EF67_MXT_T100_FINGER &&
+	     type != EF67_MXT_T100_STYLUS &&
+	     type != EF67_MXT_T100_HOVER &&
+	     type != EF67_MXT_T100_GLOVE) ||
 	    x > EF67_MXT_SCREEN_X || y > EF67_MXT_SENSOR_Y) {
 		ef67_mxt_release_contact(touch, id);
 		return;
@@ -416,14 +423,16 @@ static void ef67_mxt_report_touch(struct ef67_mxt *touch, const u8 *message)
 	}
 	if (route != 1)
 		return;
-	tool = type == 0x20 ? MT_TOOL_PEN : MT_TOOL_FINGER;
+	tool = type == EF67_MXT_T100_STYLUS ? MT_TOOL_PEN : MT_TOOL_FINGER;
 	input_mt_slot(touch->input, id);
 	input_mt_report_slot_state(touch->input, tool, true);
 	input_report_abs(touch->input, ABS_MT_POSITION_X, x);
 	input_report_abs(touch->input, ABS_MT_POSITION_Y,
 			 min_t(unsigned int, y, EF67_MXT_SCREEN_Y));
+	/* S0226114 routes hover as a finger contact with zero area. */
 	input_report_abs(touch->input, ABS_MT_TOUCH_MAJOR,
-			 tool == MT_TOOL_PEN ? 1 : message[6]);
+			 type == EF67_MXT_T100_HOVER ? 0 :
+			 (tool == MT_TOOL_PEN ? 1 : message[6]));
 }
 
 static int ef67_mxt_drain(struct ef67_mxt *touch, bool report)
