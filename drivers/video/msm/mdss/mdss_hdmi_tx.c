@@ -2441,6 +2441,14 @@ int msm_hdmi_register_mhl(struct platform_device *pdev,
 	return 0;
 }
 
+void msm_hdmi_unregister_mhl(struct platform_device *pdev)
+{
+	struct hdmi_tx_ctrl *hdmi_ctrl = platform_get_drvdata(pdev);
+
+	if (hdmi_ctrl)
+		hdmi_ctrl->ds_registered = false;
+}
+
 static int hdmi_tx_get_cable_status(struct platform_device *pdev, u32 vote)
 {
 	struct hdmi_tx_ctrl *hdmi_ctrl = platform_get_drvdata(pdev);

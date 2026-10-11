@@ -1351,6 +1351,7 @@ static int __smb135x_charging(struct smb135x_chg *chip, int enable)
 static int ef67_update_usb_current(struct smb135x_chg *chip, bool charging)
 {
 	struct tsens_device sensor = { .sensor_num = 2 };
+	struct power_supply *mhl_psy;
 	union power_supply_propval current_prop;
 	unsigned long temp = (unsigned long)LONG_MIN;
 	int rc;
@@ -1366,6 +1367,23 @@ static int ef67_update_usb_current(struct smb135x_chg *chip, bool charging)
 	if (current_prop.intval < 0)
 		return -EINVAL;
 	chip->usb_psy_ma = current_prop.intval / 1000;
+	/* MHL owns the connector while USB charger detection is stopped. */
+	mhl_psy = power_supply_get_by_name("mhl");
+	if (mhl_psy) {
+		rc = mhl_psy->get_property(mhl_psy,
+				POWER_SUPPLY_PROP_PRESENT, &current_prop);
+		if (rc)
+			return rc;
+		if (current_prop.intval) {
+			rc = mhl_psy->get_property(mhl_psy,
+					POWER_SUPPLY_PROP_CURRENT_MAX, &current_prop);
+			if (rc)
+				return rc;
+			if (current_prop.intval < 0)
+				return -EINVAL;
+			chip->usb_psy_ma = current_prop.intval / 1000;
+		}
+	}
 
 	if (charging && chip->boot_power_on_mode &&
 	    chip->usb_psy->type != POWER_SUPPLY_TYPE_USB) {

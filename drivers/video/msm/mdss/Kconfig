@@ -21,6 +21,15 @@ config FB_MSM_MDSS_HDMI_MHL_SII8334
 	  MHL (Mobile High-Definition Link) technology
 	  uses USB connector to output HDMI content
 
+config SII8620_MHL_TX
+	bool "EF67 SiI8620 MHL transmitter"
+	depends on MACH_APQ8084_EF67 && FB_MSM_MDSS_HDMI_PANEL
+	depends on SPI && OF && USB_DWC3_MSM && POWER_SUPPLY
+	depends on INPUT && HID
+	help
+	  Support the EF67 SPI-connected SiI8620, including USB/MHL cable
+	  discovery, HDMI output, remote control and sink-supplied charging.
+
 config FB_MSM_MDSS_DSI_CTRL_STATUS
 	tristate "DSI controller status check feature"
 	---help---

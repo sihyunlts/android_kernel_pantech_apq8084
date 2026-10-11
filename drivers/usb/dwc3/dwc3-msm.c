@@ -181,6 +181,8 @@ struct dwc3_msm {
 	unsigned int		qdss_tx_fifo_size;
 	bool			vbus_active;
 	bool			ext_inuse;
+	spinlock_t		ext_state_lock;
+	unsigned int		ext_online_events;
 	enum dwc3_id_state	id_state;
 	unsigned long		lpm_flags;
 #define MDWC3_PHY_REF_AND_CORECLK_OFF	BIT(0)
@@ -1847,6 +1849,7 @@ static void dwc3_ext_notify_online(void *ctx, int on)
 {
 	struct dwc3_msm *mdwc = ctx;
 	bool notify_otg = false;
+	unsigned long flags;
 
 	if (!mdwc) {
 		pr_err("%s: DWC3 driver already removed\n", __func__);
@@ -1858,7 +1861,10 @@ static void dwc3_ext_notify_online(void *ctx, int on)
 	if (!mdwc->ext_vbus_psy)
 		mdwc->ext_vbus_psy = power_supply_get_by_name("ext-vbus");
 
+	spin_lock_irqsave(&mdwc->ext_state_lock, flags);
 	mdwc->ext_inuse = on;
+	mdwc->ext_online_events++;
+	spin_unlock_irqrestore(&mdwc->ext_state_lock, flags);
 	if (on) {
 		/* force OTG to exit B-peripheral state */
 		mdwc->ext_xceiv.bsv = false;
@@ -1885,10 +1891,15 @@ static void dwc3_ext_notify_online(void *ctx, int on)
 static void dwc3_id_work(struct work_struct *w)
 {
 	struct dwc3_msm *mdwc = container_of(w, struct dwc3_msm, id_work);
+	unsigned long flags;
+	unsigned int online_events;
 	int ret;
 
 	/* Give external client a chance to handle */
 	if (!mdwc->ext_inuse && usb_ext) {
+		spin_lock_irqsave(&mdwc->ext_state_lock, flags);
+		online_events = mdwc->ext_online_events;
+		spin_unlock_irqrestore(&mdwc->ext_state_lock, flags);
 		if (mdwc->pmic_id_irq)
 			disable_irq(mdwc->pmic_id_irq);
 
@@ -1906,7 +1917,11 @@ static void dwc3_id_work(struct work_struct *w)
 			enable_irq(mdwc->pmic_id_irq);
 		}
 
-		mdwc->ext_inuse = (ret == 0);
+		/* Keep the callback state if ownership changes during discovery. */
+		spin_lock_irqsave(&mdwc->ext_state_lock, flags);
+		if (online_events == mdwc->ext_online_events)
+			mdwc->ext_inuse = (ret == 0);
+		spin_unlock_irqrestore(&mdwc->ext_state_lock, flags);
 	}
 
 	if (!mdwc->ext_inuse) { /* notify OTG */
@@ -2240,6 +2255,7 @@ static int dwc3_msm_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, mdwc);
 	mdwc->dev = &pdev->dev;
+	spin_lock_init(&mdwc->ext_state_lock);
 
 	INIT_LIST_HEAD(&mdwc->req_complete_list);
 	INIT_DELAYED_WORK(&mdwc->chg_work, dwc3_chg_detect_work);

@@ -6001,6 +6001,8 @@ static struct clk_lookup apq_clocks_8084[] = {
 	CLK_LOOKUP("iface_clk",	gcc_blsp1_ahb_clk.c,	"f991e000.serial"),
 	CLK_LOOKUP("iface_clk",	gcc_blsp1_ahb_clk.c,	"f991f000.serial"),
 	CLK_LOOKUP("iface_clk",	gcc_blsp1_ahb_clk.c,	"f9923000.spi"),
+	CLK_LOOKUP("iface_clk",	gcc_blsp1_ahb_clk.c,	"f9924000.spi"),
+	CLK_LOOKUP("core_clk",	gcc_blsp1_qup2_spi_apps_clk.c,	"f9924000.spi"),
 	CLK_LOOKUP("iface_clk",	gcc_blsp1_ahb_clk.c,	"f9925000.i2c"),
 	CLK_LOOKUP("iface_clk", gcc_blsp1_ahb_clk.c,	"f9922000.uart"),
 	/* NFC */

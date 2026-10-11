@@ -1,0 +1,46 @@
+EF67 SiI8620 MHL
+===============
+
+CONFIG_SII8620_MHL_TX enables the SPI-connected SiI8620 on EF67. It requires
+the MDSS HDMI panel, MSM DWC3, SPI, power supplies and HID/input support.
+The device is described by qcom,mhl-sii8620 under BLSP1 QUP2 (f9924000).
+
+The common transmitter, EDID, HDCP, CBUS, RCP and MHL3 HID code comes from
+Silicon Image's 2013-2014 GPL driver in the EF71 reference mhl3 directory.
+Its starter-kit platform and userspace register/GPIO/BIST test interface
+are not used. platform.c supplies the EF67 wiring instead.
+
+The S0226114 kernel binary and DT provide the board-specific reference:
+GPIO 48 interrupt, 35 chip power, 27 reset, 37/38 USB/MHL selection,
+31 switch power and 94 firmware wake. The stock driver programs PMA8084
+L14 to 1.85 V even though its original DT voltage property says 1.8 V.
+The local DT expresses the voltage actually programmed by that driver.
+The reference crystal is 24 MHz; SPI uses mode 0 at a maximum of 1 MHz.
+
+USB ID detection hands the connector to MHL only after a 1 kohm cable
+measurement. Discovery waits up to 500 ms (stock: 50 ticks at HZ=100).
+Failure or disconnection stops the transmitter and charging, calls the
+USB release callback, then lowers both switch selection pins. Queued
+timer callbacks cannot access a powered-off transmitter; pending timer
+work is drained before the next discovery. Initial standby and disconnect
+work share the connection mutex. IRQ wake enable/disable is tracked across
+disconnection during suspend. The DWC3 client
+handoff preserves an online/offline callback received during discovery.
+
+The HDMI source receives upstream HPD only after the transmitter's EDID
+FIFO is prepared. Disconnect clears HPD. Its maximum pixel clock is
+297000 kHz, as in the stock platform driver. HDMI registration is undone
+if probing fails so a deferred probe does not leave a stale downstream
+registration behind.
+
+The mhl power supply reports PRESENT, ONLINE and CURRENT_MAX to battery.
+The EF67 SMB135x current selection uses it while MHL owns the connector.
+Discovery begins at 500 mA and sink capabilities select 100/500/900/1500
+mA; the existing battery and temperature limits continue to apply.
+The EF67 board has no starter-kit VBUS-output GPIO. Use a powered MHL
+adapter. The driver's class connection_state attribute is read-only.
+
+Build success does not verify video or audio output. Without an adapter,
+probe can verify the SPI device ID/revision and ordinary USB/charging can
+be checked. An adapter and display are required to verify EDID, HDMI
+video/audio, HDCP, remote control, charging and USB restoration on unplug.

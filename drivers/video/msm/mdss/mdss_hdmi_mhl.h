@@ -24,4 +24,5 @@ struct msm_hdmi_mhl_ops {
 
 int msm_hdmi_register_mhl(struct platform_device *pdev,
 			  struct msm_hdmi_mhl_ops *ops, void *data);
+void msm_hdmi_unregister_mhl(struct platform_device *pdev);
 #endif /* __MDSS_HDMI_MHL_H__ */

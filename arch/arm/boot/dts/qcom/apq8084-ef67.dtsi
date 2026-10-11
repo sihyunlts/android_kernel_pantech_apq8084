@@ -41,6 +41,8 @@
 
 	ef67_spi_f9924000: spi@f9924000 {
 		compatible = "qcom,spi-qup-v2";
+		#address-cells = <1>;
+		#size-cells = <0>;
 		#cell-index;
 		reg-names = "spi_physical", "spi_bam_physical";
 		reg = <0xf9924000 0x1000 0xf9904000 0x19000>;
@@ -56,9 +58,6 @@
 			compatible = "qcom,mhl-sii8620";
 			reg = <0x00>;
 			spi-max-frequency = <0xf4240>;
-			#spi-cpol;
-			#spi-cpha;
-			#spi-cs-high;
 			interrupt-parent = <&msmgpio>;
 			interrupts = <0x30 0x00>;
 			mhl-intr-gpio = <&msmgpio 0x30 0>;
@@ -70,7 +69,8 @@
 			mhl-switch-pwr-gpio = <&msmgpio 0x1f 0>;
 			mhl-fw-wake-gpio = <&msmgpio 0x5e 0>;
 			sii8620-vdd-supply = <&pma8084_l14>;
-			qcom,vdd-voltage-level = <0x1b7740 0x1b7740>;
+			/* S0226114 driver programs L14 to 1.85 V. */
+			qcom,vdd-voltage-level = <1850000 1850000>;
 			qcom,vdd-current-level = <0x2328 0xc3500>;
 		};
 	};
