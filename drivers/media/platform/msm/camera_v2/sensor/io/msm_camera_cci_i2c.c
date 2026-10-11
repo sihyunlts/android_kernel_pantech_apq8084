@@ -140,31 +140,21 @@ int32_t msm_camera_cci_i2c_write_seq(struct msm_camera_i2c_client *client,
 	uint32_t addr, uint8_t *data, uint32_t num_byte)
 {
 	int32_t rc = -EFAULT;
-	uint8_t i = 0;
+	uint32_t i;
 	struct msm_camera_cci_ctrl cci_ctrl;
-	struct msm_camera_i2c_reg_array *reg_conf_tbl = NULL;
+	struct msm_camera_i2c_reg_array *reg_conf_tbl;
 
 	if ((client->addr_type != MSM_CAMERA_I2C_BYTE_ADDR
 		&& client->addr_type != MSM_CAMERA_I2C_WORD_ADDR)
-		|| num_byte == 0)
+		|| num_byte == 0 || num_byte > I2C_SEQ_REG_DATA_MAX)
 		return rc;
 
-	if (num_byte > I2C_SEQ_REG_DATA_MAX) {
-		pr_err("%s: num_byte=%d clamped to max supported %d\n",
-			__func__, num_byte, I2C_SEQ_REG_DATA_MAX);
-		return rc;
-	}
+	reg_conf_tbl = kcalloc(num_byte, sizeof(*reg_conf_tbl), GFP_KERNEL);
+	if (!reg_conf_tbl)
+		return -ENOMEM;
 
 	S_I2C_DBG("%s reg addr = 0x%x num bytes: %d\n",
-		__func__, addr, num_byte);
-
-	reg_conf_tbl = kzalloc(num_byte *
-		(sizeof(struct msm_camera_i2c_reg_array)), GFP_KERNEL);
-	if (!reg_conf_tbl) {
-		pr_err("%s:%d no memory\n", __func__, __LINE__);
-		return -ENOMEM;
-	}
-
+			  __func__, addr, num_byte);
 	reg_conf_tbl[0].reg_addr = addr;
 	for (i = 0; i < num_byte; i++) {
 		reg_conf_tbl[i].reg_data = data[i];
@@ -179,9 +169,9 @@ int32_t msm_camera_cci_i2c_write_seq(struct msm_camera_i2c_client *client,
 	rc = v4l2_subdev_call(client->cci_client->cci_subdev,
 			core, ioctl, VIDIOC_MSM_CCI_CFG, &cci_ctrl);
 	CDBG("%s line %d rc = %d\n", __func__, __LINE__, rc);
-	rc = cci_ctrl.status;
+	if (rc >= 0)
+		rc = cci_ctrl.status;
 	kfree(reg_conf_tbl);
-	reg_conf_tbl = NULL;
 	return rc;
 }
 
@@ -251,7 +241,7 @@ int32_t msm_camera_cci_i2c_write_seq_table(
 		rc = msm_camera_cci_i2c_write_seq(client, reg_setting->reg_addr,
 			reg_setting->reg_data, reg_setting->reg_data_size);
 		if (rc < 0)
-			return rc;
+			goto restore_addr_type;
 		reg_setting++;
 	}
 	if (write_setting->delay > 20)
@@ -260,6 +250,7 @@ int32_t msm_camera_cci_i2c_write_seq_table(
 		usleep_range(write_setting->delay * 1000, (write_setting->delay
 			* 1000) + 1000);
 
+restore_addr_type:
 	client->addr_type = client_addr_type;
 	return rc;
 }

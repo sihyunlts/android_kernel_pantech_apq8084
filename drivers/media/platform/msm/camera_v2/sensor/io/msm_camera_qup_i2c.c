@@ -191,12 +191,12 @@ int32_t msm_camera_qup_i2c_write_seq(struct msm_camera_i2c_client *client,
 	uint32_t addr, uint8_t *data, uint32_t num_byte)
 {
 	int32_t rc = -EFAULT;
-	unsigned char buf[client->addr_type+num_byte];
-	uint8_t len = 0, i = 0;
+	unsigned char buf[I2C_SEQ_REG_DATA_MAX + MSM_CAMERA_I2C_WORD_ADDR];
+	uint32_t len = 0, i;
 
 	if ((client->addr_type != MSM_CAMERA_I2C_BYTE_ADDR
 		&& client->addr_type != MSM_CAMERA_I2C_WORD_ADDR)
-		|| num_byte == 0)
+		|| num_byte == 0 || num_byte > I2C_SEQ_REG_DATA_MAX)
 		return rc;
 
 	S_I2C_DBG("%s reg addr = 0x%x num bytes: %d\n",

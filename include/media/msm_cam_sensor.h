@@ -9,7 +9,12 @@
 #include <linux/i2c.h>
 
 #define I2C_SEQ_REG_SETTING_MAX   5
+#ifdef CONFIG_MACH_APQ8084_EF67
+/* S0226114 sensor commands carry 256 data bytes per sequence entry. */
+#define I2C_SEQ_REG_DATA_MAX      256
+#else
 #define I2C_SEQ_REG_DATA_MAX      20
+#endif
 #define MAX_CID                   16
 
 #define MSM_SENSOR_MCLK_8HZ   8000000
