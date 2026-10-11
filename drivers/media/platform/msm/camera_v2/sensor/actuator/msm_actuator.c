@@ -97,6 +97,10 @@ static void msm_actuator_parse_i2c_params(struct msm_actuator_ctrl_t *a_ctrl,
 
 			if (write_arr[i].reg_addr != 0xFFFF) {
 				i2c_byte1 = write_arr[i].reg_addr;
+#ifdef CONFIG_MACH_APQ8084_EF67
+				/* S0226114 sends each DAC value as a swapped word. */
+				i2c_byte2 = (value << 8) | (value >> 8);
+#else
 				i2c_byte2 = value;
 				if (size != (i+1)) {
 					i2c_byte2 = value & 0xFF;
@@ -113,6 +117,7 @@ static void msm_actuator_parse_i2c_params(struct msm_actuator_ctrl_t *a_ctrl,
 					i2c_byte1 = write_arr[i].reg_addr;
 					i2c_byte2 = (value & 0xFF00) >> 8;
 				}
+#endif
 			} else {
 				i2c_byte1 = (value & 0xFF00) >> 8;
 				i2c_byte2 = value & 0xFF;
@@ -126,6 +131,9 @@ static void msm_actuator_parse_i2c_params(struct msm_actuator_ctrl_t *a_ctrl,
 		i2c_tbl[a_ctrl->i2c_tbl_index].reg_addr = i2c_byte1;
 		i2c_tbl[a_ctrl->i2c_tbl_index].reg_data = i2c_byte2;
 		i2c_tbl[a_ctrl->i2c_tbl_index].delay = delay;
+#ifdef CONFIG_MACH_APQ8084_EF67
+		a_ctrl->i2c_data_type = MSM_CAMERA_I2C_WORD_DATA;
+#endif
 		a_ctrl->i2c_tbl_index++;
 	}
 	CDBG("Exit\n");
@@ -136,9 +144,47 @@ static int32_t msm_actuator_init_focus(struct msm_actuator_ctrl_t *a_ctrl,
 {
 	int32_t rc = -EFAULT;
 	int32_t i = 0;
+#ifdef CONFIG_MACH_APQ8084_EF67
+	enum msm_camera_i2c_reg_addr_type saved_addr_type =
+		a_ctrl->i2c_client.addr_type;
+	enum msm_camera_i2c_data_type data_type;
+#endif
 	CDBG("Enter\n");
 
 	for (i = 0; i < size; i++) {
+#ifdef CONFIG_MACH_APQ8084_EF67
+		/* Stock initialization selects the address size per entry. */
+		if (settings[i].addr_type != MSM_ACTUATOR_BYTE_ADDR &&
+			settings[i].addr_type != MSM_ACTUATOR_WORD_ADDR) {
+			rc = -EINVAL;
+			break;
+		}
+		a_ctrl->i2c_client.addr_type = settings[i].addr_type;
+		data_type = settings[i].data_type;
+		if (settings[i].i2c_operation == MSM_ACT_WRITE &&
+			settings[i].reg_addr == 0x2C0)
+			data_type = MSM_CAMERA_I2C_WORD_DATA;
+		if (data_type != MSM_CAMERA_I2C_BYTE_DATA &&
+			data_type != MSM_CAMERA_I2C_WORD_DATA) {
+			rc = -EINVAL;
+			break;
+		}
+		switch (settings[i].i2c_operation) {
+		case MSM_ACT_WRITE:
+			rc = a_ctrl->i2c_client.i2c_func_tbl->i2c_write(
+				&a_ctrl->i2c_client, settings[i].reg_addr,
+				settings[i].reg_data, data_type);
+			break;
+		case MSM_ACT_POLL:
+			rc = a_ctrl->i2c_client.i2c_func_tbl->i2c_poll(
+				&a_ctrl->i2c_client, settings[i].reg_addr,
+				settings[i].reg_data, data_type);
+			break;
+		default:
+			rc = -EINVAL;
+			break;
+		}
+#else
 		switch (settings[i].i2c_operation) {
 		case MSM_ACT_WRITE: {
 			switch (settings[i].data_type) {
@@ -186,6 +232,7 @@ static int32_t msm_actuator_init_focus(struct msm_actuator_ctrl_t *a_ctrl,
 		}
 		}
 
+#endif
 		if (0 != settings[i].delay)
 			msleep(settings[i].delay);
 
@@ -193,6 +240,9 @@ static int32_t msm_actuator_init_focus(struct msm_actuator_ctrl_t *a_ctrl,
 			break;
 	}
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+	a_ctrl->i2c_client.addr_type = saved_addr_type;
+#endif
 	a_ctrl->curr_step_pos = 0;
 	a_ctrl->valid_position = 0;
 	CDBG("Exit\n");

@@ -1,12 +1,12 @@
-EF67S camera power support
-=========================
+EF67S camera support
+====================
 
 Target: IM-A930S, stock firmware S0226114.
 
-This restores the stock camera GPIO mappings and the EEPROM power-sequence
-name sensor_gpio_cam0_avdd_en. It does not implement sensor imaging, OIS or
-camera HAL compatibility. DTS voltages, regulators, GPIOs and delays are
-unchanged.
+This restores stock camera GPIO mappings, EEPROM clock/power handling,
+userspace command layouts, image updates and rear lens transmission.
+DTS voltages, regulators, GPIOs and delays are unchanged. Dedicated OIS
+mode and information commands are not implemented.
 
 Stock GPIO sequence ABI
 ----------------------
@@ -79,9 +79,9 @@ The actual mux helper also passed initialization/configuration failure
 checks. EF67 zImage/dtbs and the common camera subtree with EF67 disabled
 built successfully.
 
-No hardware boot or EEPROM read has been verified for this change. Sensor
-library power sequences, cam_r* regulator ID translation, IMX214/S5K6B2YX,
-OIS and userspace camera ABI compatibility still need separate work.
+Hardware testing with the stock ROM confirms front/rear preview, restored
+colors and preview rate, rear focus and OIS operation. This does not verify
+still/video capture, every OIS mode, or long-term stability.
 
 References:
   https://www.kernel.org/doc/Documentation/gpio/gpio-legacy.txt
@@ -91,3 +91,61 @@ References:
 The VegaDevTeam msm8974 IMX214 extension also has camera power GPIO IDs,
 but its header omits flash slots 7/8. Its numeric ABI cannot be copied to
 EF67S; the mappings above follow the EF67S stock binary.
+
+Stock sequential sensor-write ABI
+---------------------------------
+
+S0226114 msm_camera_cci_i2c_write_seq_table at 0xc06e02cc reads the
+length at entry offset 258 and advances each entry by 260 bytes. The
+data array therefore has 256 bytes, rather than the common 20-byte
+layout. Restore this layout for CONFIG_MACH_APQ8084_EF67 only.
+
+A live camera crash interrupted msm_camera_cci_i2c_write_seq with
+num_byte=46844. The old 24-byte layout interpreted sensor data as the
+length; the unbounded stack allocation and memset overwrote unrelated
+kernel memory. Bound sequential writes before allocating, use heap
+storage for the CCI register table, and allow the loop to reach 256.
+Restore the client address type and release storage on failures.
+QUP uses a bounded buffer and a counter capable of handling 256 bytes.
+
+Extracted-function checks cover the common 24-byte and EF67 260-byte
+layouts, valid and excessive lengths, allocation/transport errors and
+address restoration. Device logs confirm valid sequential-write lengths
+and stable camera preview after correcting the command layout.
+
+Stock AXI stream update command numbers
+--------------------------------------
+
+S0226114 msm_isp_update_axi_stream at 0xc06fcb58 checks update type 4
+for a pending AXI change. Its jump table at 0xc06fcc64 maps 2 to the
+framedrop update, rejects 3, handles 4 as AXI configuration and 5 as a
+frame request. The 100-byte update item and its fields match this tree.
+For EF67, reserve UPDATE_STREAM_STATS_FRAMEDROP_PATTERN at 3 so the
+existing AXI configuration/frame-request cases use stock IDs 4 and 5.
+The image ioctl still rejects the reserved statistics ID, as stock does.
+Other machines retain IDs 3 and 4. The built EF67 enumeration was checked.
+Device logs confirm type 4 updates chroma WM dimensions correctly and
+eliminates the observed ping-pong mismatch. The user confirms corrected
+colors and preview rate; occasional stutter needs a stock comparison.
+
+Stock rear lens command packing
+-------------------------------
+
+S0226114 msm_actuator_parse_i2c_params at 0xc06e4c68 sends one table entry
+per input DAC register, swaps each addressed 16-bit DAC value and selects
+WORD_DATA. The common implementation splits adjacent entries and keeps
+the requested data size; retain that behavior for other machines.
+
+Stock msm_actuator_init_focus at 0xc06e4f38 selects each initialization
+entry's address size and restores the original client size afterward.
+Writes to register 0x2c0 use WORD_DATA. Writes do not fall through into a
+poll. Restore those EF67 behaviors while keeping requested delays and
+propagating transport errors. OIS control commands have not been added.
+
+Extracted-function checks pass for both EF67 and common configurations:
+DAC byte order and masked bits, per-entry address/data widths, the 0x2c0
+word write, write/poll separation, transport errors and address restore.
+The user confirms rear focus, colors, preview rate and OIS appear normal.
+Device logs contain no VFE ping-pong mismatch or lens-write/park failure.
+This does not verify all modes: the common focus-region/zero-position
+handling and the absent stock OIS control/info commands still differ.
