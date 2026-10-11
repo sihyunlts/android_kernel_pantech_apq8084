@@ -631,11 +631,11 @@ config APQ8084_DOCKING_STATION
 	  the QTI APQ8084 Docking Station.
 
 config FPC_BTP_EF67
-	tristate "Pantech EF67 FPC1021 fingerprint capture"
-	depends on SPI && OF_GPIO && REGULATOR && ARCH_MSM
+	tristate "Pantech EF67 FPC1021 capture and navigation"
+	depends on SPI && OF_GPIO && REGULATOR && ARCH_MSM && INPUT
 	help
-	  Provides the fpc_btp image capture interface for the EF67
-	  fingerprint sensor.
+	  Provides the fpc_btp image capture interface and stock navigation
+	  input devices for the EF67 fingerprint sensor.
 
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"

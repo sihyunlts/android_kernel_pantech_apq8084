@@ -1,0 +1,43 @@
+What: /sys/bus/spi/devices/.../nav_settings/
+Date: October 2026
+Description:
+        FPC1021 navigation settings recovered from EF67S S0226114.
+        Attributes use mode 0660. Reads return "attribute_name: value\n";
+        writes accept a decimal integer.
+
+        p_multiplier_x, p_multiplier_y, p_sensitivity_key,
+        p_sensitivity_ptr, multiplier_key_accel, multiplier_ptr_accel,
+        threshold_key_accel, threshold_ptr_accel, threshold_ptr_start,
+        duration_ptr_clear: 0..255.
+        nav_finger_up_threshold: 0..12.
+        btp_input_mode: 1 (touch), 2 (trackpad), 3 (mouse). Changing mode
+        restores that mode's stock defaults. Settings changed during
+        navigation restart it; capture uses its own saved settings.
+
+        Input names are fpcMouse, fpcTrackpad and fpcTouchpad. Mouse and
+        trackpad report relative movement; touch reports absolute
+        coordinates and contact. A stationary mouse contact longer than
+        900 ms reports a right click. The stock worker does not generate
+        tap/left-click or wheel events despite advertising those
+        capabilities; this implementation preserves that behavior.
+
+What: /dev/fpc_btp navigation commands
+Date: October 2026
+Description:
+        Navigation ioctl 0x4004fc04 and legacy commands 5001, 5002, 5003
+        take the mode directly in arg (1 touch, 2 trackpad, 3 mouse),
+        not a userspace pointer. The legacy command number does not
+        select the mode.
+
+        One text write per open accepts the stock prefixes touch,
+        trackpad, mouse or stop_navi. A trailing newline is accepted.
+        A mode command starts navigation and requests a single restart
+        when the file closes. A close during suspend defers that restart
+        until resume. stop_navi clears that request.
+
+        Capture and navigation share a serialized sensor worker.
+        Capture, cancellation, suspend and removal release any active
+        synthetic touch before changing sensor state. Stop/abort ioctls
+        stop the current worker but retain an explicit close restart
+        request. Suspend retains navigation intent; resume restarts
+        only when enabled. An explicit stop_navi remains stopped.

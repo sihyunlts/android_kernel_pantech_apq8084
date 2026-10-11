@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Pantech EF67 FPC1021 image capture interface. */
+/* Pantech EF67 FPC1021 capture and navigation interface. */
 #include <linux/delay.h>
 #include <linux/fs.h>
 #include <linux/gpio.h>
 #include <linux/hwmon-sysfs.h>
 #include <linux/interrupt.h>
+#include <linux/input.h>
+#include <linux/jiffies.h>
 #include <linux/kref.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
@@ -17,6 +19,8 @@
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 #include <mach/gpio.h>
+
+#include "fpc-btp-ef67-nav.h"
 
 #define FPC_FRAME_SIZE (160 * 160)
 #define FPC_FRAME_COUNT 5
@@ -36,7 +40,12 @@ struct ef67_fpc {
 	/* control serializes cancellation, configuration, PM and removal. */
 	struct mutex control;
 	struct mutex data_lock;
-	struct work_struct capture_work;
+	struct workqueue_struct *sensor_queue;
+	struct work_struct sensor_work;
+	struct input_dev *inputs[3];
+	struct ef67_fpc_nav_settings nav_settings;
+	struct ef67_fpc_nav_settings active_nav_settings;
+	struct ef67_fpc_nav_state nav_state;
 	wait_queue_head_t irq_wait;
 	wait_queue_head_t read_wait;
 	atomic_t cancel;
@@ -65,12 +74,17 @@ struct ef67_fpc {
 	bool suspended;
 	bool removed;
 	bool first_try;
+	bool navigation_enabled;
+	bool navigation_active;
+	bool navigation_on_close;
 };
 
 static void ef67_fpc_free(struct kref *ref)
 {
 	struct ef67_fpc *fpc = container_of(ref, struct ef67_fpc, ref);
 
+	if (fpc->sensor_queue)
+		destroy_workqueue(fpc->sensor_queue);
 	kfree(fpc->spi_buffer);
 	kfree(fpc->images);
 	kfree(fpc);
@@ -237,7 +251,7 @@ static int ef67_fpc_finger_count(struct ef67_fpc *fpc)
 	return ret ? ret : hweight16(value & 0xfff);
 }
 
-static int ef67_fpc_wait_finger(struct ef67_fpc *fpc)
+static int ef67_fpc_wait_finger(struct ef67_fpc *fpc, unsigned int threshold)
 {
 	int ret;
 
@@ -261,15 +275,116 @@ static int ef67_fpc_wait_finger(struct ef67_fpc *fpc)
 		if (atomic_read(&fpc->cancel))
 			return -ECANCELED;
 		ret = ef67_fpc_finger_count(fpc);
-		if (ret < 0 || ret > 6)
+		if (ret < 0 || ret > threshold)
 			return ret < 0 ? ret : 0;
 		msleep(20);
 	}
 }
 
-static void ef67_fpc_capture(struct work_struct *work)
+static void ef67_fpc_release_touch(struct ef67_fpc *fpc)
 {
-	struct ef67_fpc *fpc = container_of(work, struct ef67_fpc, capture_work);
+	if (fpc->nav_state.touch_down && fpc->inputs[FPC_INPUT_TOUCH - 1]) {
+		input_report_key(fpc->inputs[FPC_INPUT_TOUCH - 1], BTN_TOUCH, 0);
+		input_sync(fpc->inputs[FPC_INPUT_TOUCH - 1]);
+		fpc->nav_state.touch_down = false;
+	}
+}
+
+static void ef67_fpc_report_navigation(struct ef67_fpc *fpc, int dx, int dy,
+				       unsigned int contact)
+{
+	unsigned int mode = fpc->active_nav_settings.btp_input_mode;
+
+	ef67_fpc_nav_event(&fpc->nav_state, &fpc->active_nav_settings,
+			   fpc->inputs[mode - 1], dx, dy, contact,
+			   jiffies_to_msecs(jiffies));
+}
+
+static int ef67_fpc_nav_read_image(struct ef67_fpc *fpc, u8 *image)
+{
+	int ret, irq;
+
+	memset(fpc->spi_buffer, 0, FPC_NAV_FRAME_SIZE + 2);
+	fpc->spi_buffer[0] = 0xc4;
+	ret = ef67_fpc_transfer(fpc, FPC_NAV_FRAME_SIZE + 2);
+	if (ret)
+		return ret;
+	memcpy(image, fpc->spi_buffer + 2, FPC_NAV_FRAME_SIZE);
+	irq = ef67_fpc_read_irq(fpc);
+	return irq < 0 ? irq : irq & 4 ? -EIO : 0;
+}
+
+static void ef67_fpc_navigation(struct ef67_fpc *fpc)
+{
+	unsigned int mode = fpc->active_nav_settings.btp_input_mode;
+	u8 *previous_image = fpc->images;
+	u8 *current_image = previous_image + FPC_NAV_FRAME_SIZE;
+	unsigned long reported = 0;
+	int ret, dx, dy, sum_x = 0, sum_y = 0;
+
+	ret = ef67_fpc_setup(fpc);
+	if (!ret)
+		ret = ef67_fpc_write_register(fpc, 0x54, 0x4c0800a0, 4);
+	while (!ret && !atomic_read(&fpc->cancel)) {
+		ret = ef67_fpc_wait_finger(fpc, mode == FPC_INPUT_TOUCH ? 6 : 0);
+		if (!ret)
+			ret = ef67_fpc_command(fpc, 0xc0, 0x20);
+		if (ret)
+			break;
+		ef67_fpc_report_navigation(fpc, 0, 0, FPC_CONTACT_DOWN);
+		ret = ef67_fpc_write_register(fpc, 0xa0, 0x0a01, 2);
+		if (!ret)
+			ret = ef67_fpc_nav_read_image(fpc, previous_image);
+		while (!ret && !atomic_read(&fpc->cancel)) {
+			u8 *swap;
+
+			ret = ef67_fpc_command(fpc, 0xc0, 0x20);
+			if (!ret)
+				ret = ef67_fpc_nav_read_image(fpc, current_image);
+			if (!ret)
+				ret = ef67_fpc_finger_count(fpc);
+			if (ret < 0)
+				break;
+			if (ret <= fpc->active_nav_settings.nav_finger_up_threshold) {
+				ef67_fpc_report_navigation(fpc, 0, 0, FPC_CONTACT_UP);
+				/* A hold filter must never leave a synthetic touch pressed. */
+				ef67_fpc_release_touch(fpc);
+				sum_x = 0;
+				sum_y = 0;
+				reported = 0;
+				ret = 0;
+				break;
+			}
+			ret = ef67_fpc_write_register(fpc, 0xa0, 0x0a01, 2);
+			if (ret || atomic_read(&fpc->cancel))
+				break;
+			ef67_fpc_nav_movement(previous_image, current_image, &dx, &dy);
+			sum_x += dx;
+			sum_y += dy;
+			/* Stock dispatches after more than one 100-Hz jiffy. */
+			if (jiffies_to_usecs(jiffies - reported) > 14999) {
+				ef67_fpc_report_navigation(fpc, sum_x, sum_y,
+						   FPC_CONTACT_MOVE);
+				sum_x = 0;
+				sum_y = 0;
+				reported = jiffies;
+			}
+			swap = previous_image;
+			previous_image = current_image;
+			current_image = swap;
+		}
+	}
+	ef67_fpc_release_touch(fpc);
+	mutex_lock(&fpc->data_lock);
+	fpc->navigation_active = false;
+	fpc->running = false;
+	mutex_unlock(&fpc->data_lock);
+	if (ret && ret != -ECANCELED)
+		dev_err(&fpc->spi->dev, "navigation failed: %d\n", ret);
+}
+
+static void ef67_fpc_capture(struct ef67_fpc *fpc)
+{
 	unsigned long started = jiffies;
 	unsigned int frame;
 	int ret = ef67_fpc_setup(fpc);
@@ -297,7 +412,7 @@ static void ef67_fpc_capture(struct work_struct *work)
 			}
 		}
 		if (!ret)
-			ret = ef67_fpc_wait_finger(fpc);
+			ret = ef67_fpc_wait_finger(fpc, 6);
 		if (!ret) {
 			mutex_lock(&fpc->data_lock);
 			fpc->finger_status = 1;
@@ -370,20 +485,53 @@ static void ef67_fpc_capture(struct work_struct *work)
 	wake_up_interruptible(&fpc->read_wait);
 }
 
+static void ef67_fpc_sensor_work(struct work_struct *work)
+{
+	struct ef67_fpc *fpc = container_of(work, struct ef67_fpc, sensor_work);
+
+	if (fpc->navigation_active)
+		ef67_fpc_navigation(fpc);
+	else
+		ef67_fpc_capture(fpc);
+}
+
 /* Called with control held, never while holding data_lock. */
 static void ef67_fpc_cancel(struct ef67_fpc *fpc)
 {
 	atomic_set(&fpc->cancel, 1);
 	wake_up(&fpc->irq_wait);
-	cancel_work_sync(&fpc->capture_work);
+	cancel_work_sync(&fpc->sensor_work);
+	ef67_fpc_release_touch(fpc);
 	mutex_lock(&fpc->data_lock);
 	fpc->capture_generation++;
 	fpc->available = 0;
 	fpc->read_offset = 0;
 	fpc->running = false;
+	fpc->navigation_active = false;
 	fpc->complete = true;
 	mutex_unlock(&fpc->data_lock);
 	wake_up_interruptible(&fpc->read_wait);
+}
+
+/* control is held; the previous sensor job ends before reconfiguration. */
+static int ef67_fpc_start_navigation(struct ef67_fpc *fpc)
+{
+	int ret;
+
+	ef67_fpc_cancel(fpc);
+	ret = ef67_fpc_reset(fpc);
+	if (ret)
+		return ret;
+	memcpy(fpc->capture_adc, fpc->adc, sizeof(fpc->capture_adc));
+	fpc->active_nav_settings = fpc->nav_settings;
+	memset(&fpc->nav_state, 0, sizeof(fpc->nav_state));
+	mutex_lock(&fpc->data_lock);
+	fpc->running = true;
+	fpc->navigation_active = true;
+	mutex_unlock(&fpc->data_lock);
+	atomic_set(&fpc->cancel, 0);
+	queue_work(fpc->sensor_queue, &fpc->sensor_work);
+	return 0;
 }
 
 static int ef67_fpc_power_off(struct ef67_fpc *fpc)
@@ -456,6 +604,22 @@ static int ef67_fpc_power_on(struct ef67_fpc *fpc)
 	return 0;
 }
 
+static int ef67_fpc_navigation_selftest(struct ef67_fpc *fpc)
+{
+	bool navigation = ACCESS_ONCE(fpc->navigation_active);
+	int ret, restart;
+
+	if (navigation)
+		ef67_fpc_cancel(fpc);
+	ret = ef67_fpc_selftest(fpc);
+	if (navigation) {
+		restart = ef67_fpc_start_navigation(fpc);
+		if (restart)
+			return restart;
+	}
+	return ret;
+}
+
 static int ef67_fpc_open(struct inode *inode, struct file *file)
 {
 	struct ef67_fpc *fpc = container_of(file->private_data, struct ef67_fpc, misc);
@@ -482,6 +646,18 @@ static int ef67_fpc_release(struct inode *inode, struct file *file)
 
 	mutex_lock(&fpc->control);
 	ef67_fpc_cancel(fpc);
+	if (fpc->navigation_on_close && !fpc->removed) {
+		fpc->navigation_enabled = true;
+		/* Defer a close restart until resume if the sensor is powered off. */
+		if (!fpc->suspended) {
+			int ret = ef67_fpc_start_navigation(fpc);
+
+			if (ret)
+				dev_err(&fpc->spi->dev, "navigation restart failed: %d\n", ret);
+		}
+	} else
+		fpc->navigation_enabled = false;
+	fpc->navigation_on_close = false;
 	fpc->opened = false;
 	mutex_unlock(&fpc->control);
 	kref_put(&fpc->ref, ef67_fpc_free);
@@ -593,7 +769,7 @@ static long ef67_fpc_ioctl(struct file *file, unsigned int command,
 		fpc->running = true;
 		mutex_unlock(&fpc->data_lock);
 		atomic_set(&fpc->cancel, 0);
-		schedule_work(&fpc->capture_work);
+		queue_work(fpc->sensor_queue, &fpc->sensor_work);
 		break;
 	case FPC_ABORT:
 	case FPC_STOP:
@@ -609,10 +785,18 @@ static long ef67_fpc_ioctl(struct file *file, unsigned int command,
 	case 5001:
 	case 5002:
 	case 5003:
-		ret = -EOPNOTSUPP;
+		/* Stock takes a mode value directly, not a userspace pointer. */
+		if (arg < FPC_INPUT_TOUCH || arg > FPC_INPUT_MOUSE) {
+			ret = -EINVAL;
+			break;
+		}
+		ef67_fpc_nav_defaults(&fpc->nav_settings, arg);
+		fpc->navigation_enabled = true;
+		fpc->navigation_on_close = true;
+		ret = ef67_fpc_start_navigation(fpc);
 		break;
 	case 5005:
-		ret = ef67_fpc_selftest(fpc);
+		ret = ef67_fpc_navigation_selftest(fpc);
 		break;
 	default:
 		ret = -ENOTTY;
@@ -622,11 +806,58 @@ out:
 	return ret;
 }
 
+static ssize_t ef67_fpc_write(struct file *file, const char __user *buf,
+			    size_t count, loff_t *offset)
+{
+	struct ef67_fpc *fpc = file->private_data;
+	char command[32];
+	unsigned int mode = 0;
+	int ret = 0;
+
+	if (!count || *offset)
+		return 0;
+	if (count >= sizeof(command))
+		return -EINVAL;
+	if (copy_from_user(command, buf, count))
+		return -EFAULT;
+	command[count] = '\0';
+	if (!strncmp(command, "trackpad", 8))
+		mode = FPC_INPUT_TRACKPAD;
+	else if (!strncmp(command, "mouse", 5))
+		mode = FPC_INPUT_MOUSE;
+	else if (!strncmp(command, "touch", 5))
+		mode = FPC_INPUT_TOUCH;
+	else if (strncmp(command, "stop_navi", 9))
+		return -EINVAL;
+	mutex_lock(&fpc->control);
+	if (fpc->removed)
+		ret = -ENODEV;
+	else if (fpc->suspended)
+		ret = -EHOSTDOWN;
+	else if (mode) {
+		ef67_fpc_nav_defaults(&fpc->nav_settings, mode);
+		fpc->navigation_enabled = true;
+		fpc->navigation_on_close = true;
+		ret = ef67_fpc_start_navigation(fpc);
+	} else {
+		fpc->navigation_enabled = false;
+		fpc->navigation_on_close = false;
+		ef67_fpc_cancel(fpc);
+		ret = ef67_fpc_reset(fpc);
+	}
+	mutex_unlock(&fpc->control);
+	if (ret)
+		return ret;
+	*offset += count;
+	return count;
+}
+
 static const struct file_operations ef67_fpc_fops = {
 	.owner = THIS_MODULE,
 	.open = ef67_fpc_open,
 	.release = ef67_fpc_release,
 	.read = ef67_fpc_read,
+	.write = ef67_fpc_write,
 	.poll = ef67_fpc_poll,
 	.unlocked_ioctl = ef67_fpc_ioctl,
 	.compat_ioctl = ef67_fpc_ioctl,
@@ -719,7 +950,7 @@ static ssize_t ef67_fpc_diag_show(struct device *dev,
 
 	mutex_lock(&fpc->control);
 	if (index == 0) {
-		value = ef67_fpc_selftest(fpc);
+		value = ef67_fpc_navigation_selftest(fpc);
 	} else {
 		mutex_lock(&fpc->data_lock);
 		switch (index) {
@@ -747,7 +978,7 @@ static ssize_t ef67_fpc_threshold_store(struct device *dev,
 	if (value > 12)
 		return -EINVAL;
 	mutex_lock(&fpc->control);
-	if (ACCESS_ONCE(fpc->running))
+	if (ACCESS_ONCE(fpc->running) && !ACCESS_ONCE(fpc->navigation_active))
 		ret = -EBUSY;
 	else
 		fpc->threshold = value;
@@ -771,6 +1002,142 @@ static const struct attribute_group ef67_fpc_diag_group = {
 	.attrs = ef67_fpc_diag_attrs,
 };
 
+static ssize_t ef67_fpc_nav_show(struct device *dev,
+			       struct device_attribute *attr, char *buf)
+{
+	struct ef67_fpc *fpc = dev_get_drvdata(dev);
+	int index = to_sensor_dev_attr(attr)->index;
+	unsigned int value;
+
+	mutex_lock(&fpc->control);
+	value = ((u8 *)&fpc->nav_settings)[index];
+	mutex_unlock(&fpc->control);
+	return scnprintf(buf, PAGE_SIZE, "%s: %u\n", attr->attr.name, value);
+}
+
+static ssize_t ef67_fpc_nav_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct ef67_fpc *fpc = dev_get_drvdata(dev);
+	int index = to_sensor_dev_attr(attr)->index;
+	unsigned int value;
+	int ret = kstrtouint(buf, 10, &value);
+	bool restart;
+
+	if (ret)
+		return ret;
+	if (value > 255 || (index == 10 && value > 12) ||
+	    (index == 11 && (value < FPC_INPUT_TOUCH || value > FPC_INPUT_MOUSE)))
+		return -EINVAL;
+	mutex_lock(&fpc->control);
+	if (fpc->removed) {
+		ret = -ENODEV;
+		goto out;
+	}
+	restart = ACCESS_ONCE(fpc->navigation_active);
+	if (restart)
+		ef67_fpc_cancel(fpc);
+	if (index == 11)
+		ef67_fpc_nav_defaults(&fpc->nav_settings, value);
+	else
+		((u8 *)&fpc->nav_settings)[index] = value;
+	if (restart)
+		ret = ef67_fpc_start_navigation(fpc);
+out:
+	mutex_unlock(&fpc->control);
+	return ret ? ret : count;
+}
+
+#define FPC_NAV_ATTR(name) \
+	static SENSOR_DEVICE_ATTR(name, 0660, ef67_fpc_nav_show, \
+		 ef67_fpc_nav_store, offsetof(struct ef67_fpc_nav_settings, name))
+FPC_NAV_ATTR(p_multiplier_x);
+FPC_NAV_ATTR(p_multiplier_y);
+FPC_NAV_ATTR(p_sensitivity_key);
+FPC_NAV_ATTR(p_sensitivity_ptr);
+FPC_NAV_ATTR(multiplier_key_accel);
+FPC_NAV_ATTR(multiplier_ptr_accel);
+FPC_NAV_ATTR(threshold_key_accel);
+FPC_NAV_ATTR(threshold_ptr_accel);
+FPC_NAV_ATTR(threshold_ptr_start);
+FPC_NAV_ATTR(duration_ptr_clear);
+FPC_NAV_ATTR(nav_finger_up_threshold);
+FPC_NAV_ATTR(btp_input_mode);
+static struct attribute *ef67_fpc_nav_attrs[] = {
+	FPC_ATTRIBUTE(p_sensitivity_key), FPC_ATTRIBUTE(p_sensitivity_ptr),
+	FPC_ATTRIBUTE(p_multiplier_x), FPC_ATTRIBUTE(p_multiplier_y),
+	FPC_ATTRIBUTE(multiplier_key_accel), FPC_ATTRIBUTE(multiplier_ptr_accel),
+	FPC_ATTRIBUTE(threshold_key_accel), FPC_ATTRIBUTE(threshold_ptr_accel),
+	FPC_ATTRIBUTE(threshold_ptr_start), FPC_ATTRIBUTE(duration_ptr_clear),
+	FPC_ATTRIBUTE(nav_finger_up_threshold), FPC_ATTRIBUTE(btp_input_mode), NULL,
+};
+static const struct attribute_group ef67_fpc_nav_group = {
+	.name = "nav_settings",
+	.attrs = ef67_fpc_nav_attrs,
+};
+
+static void ef67_fpc_unregister_inputs(struct ef67_fpc *fpc)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(fpc->inputs); i++) {
+		if (fpc->inputs[i]) {
+			input_unregister_device(fpc->inputs[i]);
+			fpc->inputs[i] = NULL;
+		}
+	}
+}
+
+static int ef67_fpc_register_inputs(struct ef67_fpc *fpc)
+{
+	static const char * const names[] = {
+		"fpcTouchpad", "fpcTrackpad", "fpcMouse",
+	};
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < ARRAY_SIZE(fpc->inputs); i++) {
+		unsigned int mode = i == 0 ? FPC_INPUT_TRACKPAD :
+				    i == 1 ? FPC_INPUT_MOUSE : FPC_INPUT_TOUCH;
+		struct input_dev *input = input_allocate_device();
+
+		if (!input) {
+			ret = -ENOMEM;
+			goto fail;
+		}
+		input->name = names[mode - 1];
+		input->dev.parent = &fpc->spi->dev;
+		if (mode == FPC_INPUT_TOUCH) {
+			input_set_capability(input, EV_KEY, BTN_TOUCH);
+			__set_bit(EV_ABS, input->evbit);
+			__set_bit(INPUT_PROP_DIRECT, input->propbit);
+			input_set_abs_params(input, ABS_X, 0, 1440, 0, 0);
+			input_set_abs_params(input, ABS_Y, 0, 2560, 0, 0);
+			input_set_abs_params(input, ABS_Z, 0, 255, 0, 0);
+		} else {
+			input_set_capability(input, EV_REL, REL_X);
+			input_set_capability(input, EV_REL, REL_Y);
+			input_set_capability(input, EV_KEY, BTN_LEFT);
+			if (mode == FPC_INPUT_MOUSE) {
+				input_set_capability(input, EV_KEY, BTN_RIGHT);
+				input_set_capability(input, EV_REL, REL_WHEEL);
+			} else {
+				input_set_capability(input, EV_KEY, KEY_ENTER);
+			}
+		}
+		ret = input_register_device(input);
+		if (ret) {
+			input_free_device(input);
+			goto fail;
+		}
+		fpc->inputs[mode - 1] = input;
+	}
+	return 0;
+fail:
+	ef67_fpc_unregister_inputs(fpc);
+	return ret;
+}
+
 static int ef67_fpc_probe(struct spi_device *spi)
 {
 	static const char * const supplies[] = { "vddio", "vdd", "vddaux" };
@@ -791,10 +1158,16 @@ static int ef67_fpc_probe(struct spi_device *spi)
 	mutex_init(&fpc->data_lock);
 	init_waitqueue_head(&fpc->read_wait);
 	init_waitqueue_head(&fpc->irq_wait);
-	INIT_WORK(&fpc->capture_work, ef67_fpc_capture);
+	INIT_WORK(&fpc->sensor_work, ef67_fpc_sensor_work);
+	fpc->sensor_queue = alloc_ordered_workqueue("fpc_btp", WQ_MEM_RECLAIM);
+	if (!fpc->sensor_queue) {
+		ret = -ENOMEM;
+		goto free;
+	}
 	fpc->spi = spi;
 	fpc->capture_mode = 1;
 	fpc->threshold = 0;
+	ef67_fpc_nav_defaults(&fpc->nav_settings, FPC_INPUT_TOUCH);
 	memcpy(fpc->adc, adc, sizeof(adc));
 	fpc->images = kzalloc(FPC_FRAME_SIZE * FPC_FRAME_COUNT, GFP_KERNEL);
 	fpc->spi_buffer = kzalloc(FPC_FRAME_SIZE + 2, GFP_KERNEL);
@@ -857,25 +1230,40 @@ static int ef67_fpc_probe(struct spi_device *spi)
 	if (ret)
 		goto power_off;
 	spi_set_drvdata(spi, fpc);
-	ret = sysfs_create_group(&spi->dev.kobj, &ef67_fpc_setup_group);
+	ret = ef67_fpc_register_inputs(fpc);
 	if (ret)
 		goto clear_data;
+	fpc->navigation_enabled = true;
+	ret = ef67_fpc_start_navigation(fpc);
+	if (ret)
+		goto unregister_inputs;
+	ret = sysfs_create_group(&spi->dev.kobj, &ef67_fpc_setup_group);
+	if (ret)
+		goto unregister_inputs;
 	ret = sysfs_create_group(&spi->dev.kobj, &ef67_fpc_diag_group);
 	if (ret)
 		goto remove_setup;
+	ret = sysfs_create_group(&spi->dev.kobj, &ef67_fpc_nav_group);
+	if (ret)
+		goto remove_diag;
 	fpc->misc.minor = MISC_DYNAMIC_MINOR;
 	fpc->misc.name = "fpc_btp";
 	fpc->misc.fops = &ef67_fpc_fops;
 	fpc->misc.parent = &spi->dev;
 	ret = misc_register(&fpc->misc);
-	if (ret) {
-		sysfs_remove_group(&spi->dev.kobj, &ef67_fpc_diag_group);
-		goto remove_setup;
-	}
-	dev_info(&spi->dev, "FPC1021 image capture ready\n");
+	if (ret)
+		goto remove_nav;
+	dev_info(&spi->dev, "FPC1021 capture and navigation ready\n");
 	return 0;
+remove_nav:
+	sysfs_remove_group(&spi->dev.kobj, &ef67_fpc_nav_group);
+remove_diag:
+	sysfs_remove_group(&spi->dev.kobj, &ef67_fpc_diag_group);
 remove_setup:
 	sysfs_remove_group(&spi->dev.kobj, &ef67_fpc_setup_group);
+unregister_inputs:
+	ef67_fpc_cancel(fpc);
+	ef67_fpc_unregister_inputs(fpc);
 clear_data:
 	spi_set_drvdata(spi, NULL);
 power_off:
@@ -909,6 +1297,8 @@ static int ef67_fpc_suspend(struct device *dev)
 			restore = ef67_fpc_reset(fpc);
 			if (!restore)
 				restore = ef67_fpc_verify_id(fpc);
+			if (!restore && fpc->navigation_enabled)
+				restore = ef67_fpc_start_navigation(fpc);
 			if (restore)
 				disable_irq(fpc->irq);
 		}
@@ -937,6 +1327,8 @@ static int ef67_fpc_resume(struct device *dev)
 		ret = ef67_fpc_reset(fpc);
 		if (!ret)
 			ret = ef67_fpc_verify_id(fpc);
+		if (!ret && fpc->navigation_enabled)
+			ret = ef67_fpc_start_navigation(fpc);
 		if (ret)
 			disable_irq(fpc->irq);
 	}
@@ -953,6 +1345,7 @@ static int ef67_fpc_remove(struct spi_device *spi)
 	struct ef67_fpc *fpc = spi_get_drvdata(spi);
 
 	misc_deregister(&fpc->misc);
+	sysfs_remove_group(&spi->dev.kobj, &ef67_fpc_nav_group);
 	sysfs_remove_group(&spi->dev.kobj, &ef67_fpc_diag_group);
 	sysfs_remove_group(&spi->dev.kobj, &ef67_fpc_setup_group);
 	mutex_lock(&fpc->control);
@@ -960,6 +1353,7 @@ static int ef67_fpc_remove(struct spi_device *spi)
 	fpc->removed = true;
 	mutex_unlock(&fpc->data_lock);
 	ef67_fpc_cancel(fpc);
+	ef67_fpc_unregister_inputs(fpc);
 	ef67_fpc_power_off(fpc);
 	free_irq(fpc->irq, fpc);
 	mutex_unlock(&fpc->control);
@@ -1000,5 +1394,5 @@ static struct spi_driver ef67_fpc_driver = {
 	.shutdown = ef67_fpc_shutdown,
 };
 module_spi_driver(ef67_fpc_driver);
-MODULE_DESCRIPTION("Pantech EF67 FPC1021 image capture");
+MODULE_DESCRIPTION("Pantech EF67 FPC1021 capture and navigation");
 MODULE_LICENSE("GPL");
