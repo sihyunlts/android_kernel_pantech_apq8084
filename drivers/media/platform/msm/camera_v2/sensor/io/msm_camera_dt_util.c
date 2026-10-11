@@ -32,14 +32,14 @@ int msm_camera_fill_vreg_params(struct camera_vreg_t *cam_vreg,
 	int      j = 0;
 
 	/* Validate input parameters */
-	if (!cam_vreg || !power_setting) {
+	if (!power_setting || (num_vreg > 0 && !cam_vreg)) {
 		pr_err("%s:%d failed: cam_vreg %p power_setting %p", __func__,
 			__LINE__,  cam_vreg, power_setting);
 		return -EINVAL;
 	}
 
 	/* Validate size of num_vreg */
-	if (num_vreg <= 0) {
+	if (num_vreg < 0) {
 		pr_err("failed: num_vreg %d", num_vreg);
 		return -EINVAL;
 	}
@@ -47,6 +47,9 @@ int msm_camera_fill_vreg_params(struct camera_vreg_t *cam_vreg,
 	for (i = 0; i < power_setting_size; i++) {
 		if (power_setting[i].seq_type != SENSOR_VREG)
 			continue;
+		/* GPIO-powered sensors legitimately have no regulators. */
+		if (!num_vreg)
+			return -EINVAL;
 
 		switch (power_setting[i].seq_val) {
 		case CAM_VDIG:

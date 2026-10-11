@@ -216,6 +216,7 @@ int msm_isp_stats_create_stream(struct vfe_device *vfe_dev,
 	stream_info->stats_type = stream_req_cmd->stats_type;
 	stream_info->buffer_offset = stream_req_cmd->buffer_offset;
 	stream_info->framedrop_pattern = stream_req_cmd->framedrop_pattern;
+	stream_info->init_stats_frame_drop = stream_req_cmd->init_frame_drop;
 	stream_info->irq_subsample_pattern =
 		stream_req_cmd->irq_subsample_pattern;
 	stream_info->state = STATS_INACTIVE;
@@ -267,8 +268,27 @@ int msm_isp_request_stats_stream(struct vfe_device *vfe_dev, void *arg)
 		vfe_dev->hw_info->vfe_ops.stats_ops.
 			cfg_wm_irq_mask(vfe_dev, stream_info);
 
-	vfe_dev->hw_info->vfe_ops.stats_ops.cfg_wm_reg(vfe_dev, stream_info);
+	if (!stream_info->init_stats_frame_drop)
+		vfe_dev->hw_info->vfe_ops.stats_ops.
+			cfg_wm_reg(vfe_dev, stream_info);
 	return rc;
+}
+
+void msm_isp_update_stats_framedrop_reg(struct vfe_device *vfe_dev)
+{
+	struct msm_vfe_stats_stream *stream_info;
+	int i;
+
+	for (i = 0; i < vfe_dev->hw_info->stats_hw_info->num_stats_type; i++) {
+		stream_info = &vfe_dev->stats_data.stream_info[i];
+		if (stream_info->state != STATS_ACTIVE ||
+			!stream_info->init_stats_frame_drop)
+			continue;
+
+		if (!--stream_info->init_stats_frame_drop)
+			vfe_dev->hw_info->vfe_ops.stats_ops.
+				cfg_wm_reg(vfe_dev, stream_info);
+	}
 }
 
 int msm_isp_release_stats_stream(struct vfe_device *vfe_dev, void *arg)
