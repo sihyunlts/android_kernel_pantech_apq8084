@@ -6050,6 +6050,11 @@ static struct clk_lookup apq_clocks_8084[] = {
 	CLK_LOOKUP("",	gcc_blsp2_uart3_apps_clk.c,	""),
 	CLK_LOOKUP("",	gcc_blsp2_uart4_apps_clk.c,	""),
 	CLK_LOOKUP("iface_clk",	gcc_blsp2_ahb_clk.c, "f9961000.uart"),
+#ifdef CONFIG_MACH_APQ8084_EF67
+	/* S0226114 clock connections for the Audience UART10 transport. */
+	CLK_LOOKUP("iface_clk", gcc_blsp2_ahb_clk.c, "f9960000.uart"),
+	CLK_LOOKUP("core_clk", gcc_blsp2_uart4_apps_clk.c, "f9960000.uart"),
+#endif
 	CLK_LOOKUP("core_clk",	gcc_blsp2_uart5_apps_clk.c, "f9961000.uart"),
 	CLK_LOOKUP("",	gcc_blsp2_uart6_apps_clk.c,	""),
 
@@ -6312,6 +6317,10 @@ static struct clk_lookup apq_clocks_8084[] = {
 	CLK_LOOKUP("core_a_clk", qdss_a_clk.c, "fd828018.hwevent"),
 
 	CLK_LOOKUP("osr_clk", div_clk1.c, "msm-dai-q6-dev.16384"),
+#ifdef CONFIG_MACH_APQ8084_EF67
+	/* S0226114 supplies the Audience reference clock from RF_CLK2. */
+	CLK_LOOKUP("osr_clk", rf_clk2.c, "es705-codec-gen0"),
+#endif
 	CLK_LOOKUP("core_mmss_clk", mmss_misc_ahb_clk.c, "fd828018.hwevent"),
 	CLK_LOOKUP("pwm_clk", div_clk2.c, "2-0048"),
 

@@ -39,6 +39,7 @@
 #include "wcd9xxx-resmgr.h"
 #include "wcd9xxx-common.h"
 #include "wcd_cpe_core.h"
+#include "es705-ef67.h"
 
 #define TOMTOM_MAD_SLIMBUS_TX_PORT 12
 #define TOMTOM_MAD_AUDIO_FIRMWARE_PATH "wcd9320/wcd9320_mad_audio.bin"
@@ -4699,7 +4700,7 @@ static int tomtom_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	return 0;
 }
 
-static int tomtom_set_channel_map(struct snd_soc_dai *dai,
+static int tomtom_set_wcd_channel_map(struct snd_soc_dai *dai,
 				unsigned int tx_num, unsigned int *tx_slot,
 				unsigned int rx_num, unsigned int *rx_slot)
 
@@ -4731,7 +4732,7 @@ static int tomtom_set_channel_map(struct snd_soc_dai *dai,
 	return 0;
 }
 
-static int tomtom_get_channel_map(struct snd_soc_dai *dai,
+static int tomtom_get_wcd_channel_map(struct snd_soc_dai *dai,
 				 unsigned int *tx_num, unsigned int *tx_slot,
 				 unsigned int *rx_num, unsigned int *rx_slot)
 
@@ -5019,6 +5020,40 @@ static void tomtom_set_rxsb_port_format(struct snd_pcm_hw_params *params,
 	}
 }
 
+/* Keep WCD ports on their original channels while the AP uses ES705 channels. */
+static int tomtom_set_channel_map(struct snd_soc_dai *dai,
+	unsigned int tx_num, unsigned int *tx_slot,
+	unsigned int rx_num, unsigned int *rx_slot)
+{
+	unsigned int wcd_tx_slots[TOMTOM_TX_MAX], wcd_rx_slots[TOMTOM_RX_MAX];
+	unsigned int wcd_tx_num = 0, wcd_rx_num = 0;
+	int ret;
+
+	if (!ef67_es705_route_enabled(dai->id))
+		return tomtom_set_wcd_channel_map(dai, tx_num, tx_slot, rx_num, rx_slot);
+	ret = tomtom_get_wcd_channel_map(dai, &wcd_tx_num, wcd_tx_slots,
+					 &wcd_rx_num, wcd_rx_slots);
+	if (ret)
+		return ret;
+	if (tx_num > wcd_tx_num || rx_num > wcd_rx_num)
+		return -EINVAL;
+	ret = ef67_es705_set_channel_map(dai->id, tx_num, tx_slot, rx_num, rx_slot);
+	if (ret)
+		return ret;
+	return tomtom_set_wcd_channel_map(dai, tx_num, wcd_tx_slots,
+					 rx_num, wcd_rx_slots);
+}
+
+static int tomtom_get_channel_map(struct snd_soc_dai *dai,
+	unsigned int *tx_num, unsigned int *tx_slot,
+	unsigned int *rx_num, unsigned int *rx_slot)
+{
+	if (ef67_es705_route_enabled(dai->id))
+		return ef67_es705_get_channel_map(dai->id, tx_num, tx_slot,
+						 rx_num, rx_slot);
+	return tomtom_get_wcd_channel_map(dai, tx_num, tx_slot, rx_num, rx_slot);
+}
+
 static int tomtom_hw_params(struct snd_pcm_substream *substream,
 			    struct snd_pcm_hw_params *params,
 			    struct snd_soc_dai *dai)
@@ -5143,6 +5178,8 @@ static int tomtom_hw_params(struct snd_pcm_substream *substream,
 		return -EINVAL;
 	}
 
+	if (ef67_es705_route_enabled(dai->id))
+		return ef67_es705_hw_params(dai->id, params);
 	return 0;
 }
 
@@ -5408,7 +5445,7 @@ static int tomtom_codec_enable_slimrx(struct snd_soc_dapm_widget *w,
 	struct wcd9xxx *core;
 	struct snd_soc_codec *codec = w->codec;
 	struct tomtom_priv *tomtom_p = snd_soc_codec_get_drvdata(codec);
-	int ret = 0;
+	int ret = 0, es705_ret = 0;
 	struct wcd9xxx_codec_dai_data *dai;
 
 	core = dev_get_drvdata(codec->dev->parent);
@@ -5430,11 +5467,21 @@ static int tomtom_codec_enable_slimrx(struct snd_soc_dapm_widget *w,
 		dai->bus_down_in_recovery = false;
 		tomtom_codec_enable_int_port(dai, codec);
 		(void) tomtom_codec_enable_slim_chmask(dai, true);
+		ret = ef67_es705_stream_start(w->shift);
+		if (ret) {
+			(void) tomtom_codec_enable_slim_chmask(dai, false);
+			break;
+		}
 		ret = wcd9xxx_cfg_slim_sch_rx(core, &dai->wcd9xxx_ch_list,
 					      dai->rate, dai->bit_width,
 					      &dai->grph);
+		if (ret) {
+			ef67_es705_stream_stop(w->shift);
+			(void) tomtom_codec_enable_slim_chmask(dai, false);
+		}
 		break;
 	case SND_SOC_DAPM_POST_PMD:
+		es705_ret = ef67_es705_stream_stop(w->shift);
 		ret = wcd9xxx_close_slim_sch_rx(core, &dai->wcd9xxx_ch_list,
 						dai->grph);
 		if (!dai->bus_down_in_recovery)
@@ -5450,7 +5497,7 @@ static int tomtom_codec_enable_slimrx(struct snd_soc_dapm_widget *w,
 		dai->bus_down_in_recovery = false;
 		break;
 	}
-	return ret;
+	return ret < 0 ? ret : es705_ret;
 }
 
 static int tomtom_codec_enable_slimvi_feedback(struct snd_soc_dapm_widget *w,
@@ -5584,7 +5631,7 @@ static int tomtom_codec_enable_slimtx(struct snd_soc_dapm_widget *w,
 	struct wcd9xxx *core;
 	struct snd_soc_codec *codec = w->codec;
 	struct tomtom_priv *tomtom_p = snd_soc_codec_get_drvdata(codec);
-	u32  ret = 0;
+	int ret = 0, es705_ret = 0;
 	struct wcd9xxx_codec_dai_data *dai;
 
 	core = dev_get_drvdata(codec->dev->parent);
@@ -5608,8 +5655,17 @@ static int tomtom_codec_enable_slimtx(struct snd_soc_dapm_widget *w,
 		ret = wcd9xxx_cfg_slim_sch_tx(core, &dai->wcd9xxx_ch_list,
 					      dai->rate, dai->bit_width,
 					      &dai->grph);
+		if (!ret) {
+			ret = ef67_es705_stream_start(w->shift);
+			if (ret) {
+				(void) wcd9xxx_close_slim_sch_tx(core,
+					&dai->wcd9xxx_ch_list, dai->grph);
+				(void) tomtom_codec_enable_slim_chmask(dai, false);
+			}
+		}
 		break;
 	case SND_SOC_DAPM_POST_PMD:
+		es705_ret = ef67_es705_stream_stop(w->shift);
 		ret = wcd9xxx_close_slim_sch_tx(core, &dai->wcd9xxx_ch_list,
 						dai->grph);
 		if (!dai->bus_down_in_recovery)
@@ -5625,7 +5681,7 @@ static int tomtom_codec_enable_slimtx(struct snd_soc_dapm_widget *w,
 		dai->bus_down_in_recovery = false;
 		break;
 	}
-	return ret;
+	return ret < 0 ? ret : es705_ret;
 }
 
 static int tomtom_codec_enable_ear_pa(struct snd_soc_dapm_widget *w,
@@ -7773,6 +7829,10 @@ static int tomtom_codec_probe(struct snd_soc_codec *codec)
 	memcpy(control->tx_chs, tomtom_tx_chs, sizeof(tomtom_tx_chs));
 
 	snd_soc_dapm_sync(dapm);
+
+	ret = ef67_es705_add_controls(codec);
+	if (ret)
+		goto err_pdata;
 
 	ret = tomtom_setup_irqs(tomtom);
 	if (ret) {

@@ -812,6 +812,7 @@
 
 	ef67_es705_codec: es705_codec {
 		compatible = "es705-codec-gen0";
+		vdd-supply = <&pma8084_l15>;
 		elemental-addr = [00 01 03 00 be 02];
 		adnc,laddr = <0xf0>;
 		slim-ifd = "es705-codec-intf";

@@ -1,0 +1,10 @@
+What: /sys/bus/slimbus/devices/es705-codec-gen0/fw_version
+Date: October 2026
+KernelVersion: 3.10
+Description:
+	Read-only firmware version obtained from the EF67 ES705 after its
+	firmware has been loaded. Each read wakes the chip, queries its
+	current version and, if no audio route is using the chip, puts it
+	back to sleep with its clock disabled. Active routes remain awake.
+	Returns EAGAIN until initialization completes, including after a
+	SLIMbus reset. Communication errors are returned to the reader.

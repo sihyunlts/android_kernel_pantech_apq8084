@@ -1,3 +1,12 @@
+config SND_SOC_ES705_EF67
+	bool "Pantech EF67 ES705 voice processing"
+	depends on MACH_APQ8084_EF67 && SLIMBUS && GPIOLIB && REGULATOR && TTY
+	depends on SND_SOC_WCD9330=y
+	select FW_LOADER
+	help
+	  Load the EF67 Audience firmware and connect voice processing controls
+	  and SLIMbus audio paths to the WCD9330 sound card.
+
 # Helper to resolve issues with configs that have SPI enabled but I2C
 # modular, meaning we can't build the codec driver in with I2C support.
 # We use an ordered list of conditional defaults to pick the appropriate
