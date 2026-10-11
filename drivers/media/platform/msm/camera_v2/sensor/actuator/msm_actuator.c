@@ -31,6 +31,107 @@ DEFINE_MSM_MUTEX(msm_actuator_mutex);
 static int32_t msm_actuator_power_up(struct msm_actuator_ctrl_t *a_ctrl);
 static int32_t msm_actuator_power_down(struct msm_actuator_ctrl_t *a_ctrl);
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+static void msm_actuator_ois_reset(struct msm_actuator_ctrl_t *a_ctrl)
+{
+	a_ctrl->ois_initialized = false;
+	a_ctrl->ois_ready = false;
+	a_ctrl->ois_info_enabled = false;
+	a_ctrl->ois_mode = -1;
+}
+
+static int msm_actuator_ois_set_mode(struct msm_actuator_ctrl_t *a_ctrl,
+	uint16_t mode)
+{
+	struct msm_camera_i2c_client *client = &a_ctrl->i2c_client;
+	uint16_t status;
+	int rc, attempt;
+
+	if (mode > 2)
+		return -EINVAL;
+
+	/* Do not access the lens before its transport and address are set. */
+	if (!a_ctrl->ois_ready)
+		return -EPIPE;
+
+	rc = client->i2c_func_tbl->i2c_write(client, 0, 0,
+		MSM_CAMERA_I2C_BYTE_DATA);
+	if (rc < 0)
+		return rc;
+
+	/* Stock waits 1 ms, then allows ten reads with 10 ms between them. */
+	udelay(1000);
+	for (attempt = 0; attempt < 10; attempt++) {
+		rc = client->i2c_func_tbl->i2c_read(client, 1, &status,
+			MSM_CAMERA_I2C_BYTE_DATA);
+		if (rc < 0)
+			return rc;
+		if (status <= 1)
+			break;
+		mdelay(10);
+	}
+	if (attempt == 10)
+		return -ETIMEDOUT;
+
+	/* Mode 0 centers the lens; modes 1 and 2 use register values 0 and 1. */
+	rc = client->i2c_func_tbl->i2c_write(client, 2,
+		mode ? mode - 1 : 5, MSM_CAMERA_I2C_BYTE_DATA);
+	if (rc < 0)
+		return rc;
+	return client->i2c_func_tbl->i2c_write(client, 0, 1,
+		MSM_CAMERA_I2C_BYTE_DATA);
+}
+
+static int msm_actuator_ois_info_ctrl(struct msm_actuator_ctrl_t *a_ctrl,
+	uint32_t enable)
+{
+	int rc;
+
+	if (enable > 1)
+		return -EINVAL;
+	if (!a_ctrl->ois_ready)
+		return -EPIPE;
+	rc = a_ctrl->i2c_client.i2c_func_tbl->i2c_write(
+		&a_ctrl->i2c_client, 0x80, enable, MSM_CAMERA_I2C_BYTE_DATA);
+	if (rc >= 0)
+		a_ctrl->ois_info_enabled = enable;
+	return rc;
+}
+
+static int msm_actuator_ois_get_info(struct msm_actuator_ctrl_t *a_ctrl,
+	struct msm_actuator_ois_info *info)
+{
+	static const uint16_t registers[] = { 0x86, 0x8e, 0x88, 0x90 };
+	uint16_t *values[] = {
+		&info->reg_86, &info->reg_8e, &info->reg_88, &info->reg_90,
+	};
+	struct msm_camera_i2c_client *client = &a_ctrl->i2c_client;
+	uint16_t value;
+	int rc, i;
+
+	if (!a_ctrl->ois_ready)
+		return -EPIPE;
+	/* Stock preserves the caller's fields while information is disabled. */
+	if (!a_ctrl->ois_info_enabled)
+		return 0;
+	rc = client->i2c_func_tbl->i2c_read(client, 1, &value,
+		MSM_CAMERA_I2C_BYTE_DATA);
+	if (rc < 0 || value != 2)
+		return rc;
+	for (i = 0; i < ARRAY_SIZE(registers); i++) {
+		udelay(1000);
+		rc = client->i2c_func_tbl->i2c_read(client, registers[i], &value,
+			MSM_CAMERA_I2C_WORD_DATA);
+		if (rc < 0)
+			return rc;
+		*values[i] = (value << 8) | (value >> 8);
+	}
+	udelay(1000);
+	/* The caller's control word is not an output field in S0226114. */
+	return rc;
+}
+#endif
+
 static struct msm_actuator msm_vcm_actuator_table;
 static struct msm_actuator msm_piezo_actuator_table;
 
@@ -602,6 +703,9 @@ static int32_t msm_actuator_vreg_control(struct msm_actuator_ctrl_t *a_ctrl,
 static int32_t msm_actuator_power_down(struct msm_actuator_ctrl_t *a_ctrl)
 {
 	int32_t rc = 0;
+#ifdef CONFIG_MACH_APQ8084_EF67
+	msm_actuator_ois_reset(a_ctrl);
+#endif
 	CDBG("Enter\n");
 	if (a_ctrl->actuator_state != ACTUATOR_POWER_DOWN) {
 
@@ -835,7 +939,13 @@ static int32_t msm_actuator_config(struct msm_actuator_ctrl_t *a_ctrl,
 	CDBG("%s type %d\n", __func__, cdata->cfgtype);
 	switch (cdata->cfgtype) {
 	case CFG_ACTUATOR_INIT:
+#ifdef CONFIG_MACH_APQ8084_EF67
+		msm_actuator_ois_reset(a_ctrl);
+#endif
 		rc = msm_actuator_init(a_ctrl);
+#ifdef CONFIG_MACH_APQ8084_EF67
+		a_ctrl->ois_initialized = rc >= 0;
+#endif
 		if (rc < 0)
 			pr_err("msm_actuator_init failed %d\n", rc);
 		break;
@@ -845,7 +955,18 @@ static int32_t msm_actuator_config(struct msm_actuator_ctrl_t *a_ctrl,
 		break;
 
 	case CFG_SET_ACTUATOR_INFO:
+#ifdef CONFIG_MACH_APQ8084_EF67
+		a_ctrl->ois_ready = false;
+#endif
 		rc = msm_actuator_set_param(a_ctrl, &cdata->cfg.set_info);
+#ifdef CONFIG_MACH_APQ8084_EF67
+		if (rc >= 0 && a_ctrl->ois_initialized) {
+			a_ctrl->ois_ready = true;
+			if (a_ctrl->ois_mode >= 0)
+				rc = msm_actuator_ois_set_mode(a_ctrl,
+					a_ctrl->ois_mode);
+		}
+#endif
 		if (rc < 0)
 			pr_err("init table failed %d\n", rc);
 		break;
@@ -881,6 +1002,25 @@ static int32_t msm_actuator_config(struct msm_actuator_ctrl_t *a_ctrl,
 		if (rc < 0)
 			pr_err("Failed actuator power up%d\n", rc);
 		break;
+
+#ifdef CONFIG_MACH_APQ8084_EF67
+	case CFG_ACTUATOR_OIS_SET_MODE:
+		if (cdata->cfg.ois_mode > 2) {
+			rc = -EINVAL;
+			break;
+		}
+		a_ctrl->ois_mode = cdata->cfg.ois_mode;
+		if (a_ctrl->ois_ready)
+			rc = msm_actuator_ois_set_mode(a_ctrl, a_ctrl->ois_mode);
+		break;
+	case CFG_ACTUATOR_OIS_INFO_CTRL:
+		rc = msm_actuator_ois_info_ctrl(a_ctrl,
+			cdata->cfg.ois_info.control);
+		break;
+	case CFG_ACTUATOR_OIS_GET_INFO:
+		rc = msm_actuator_ois_get_info(a_ctrl, &cdata->cfg.ois_info);
+		break;
+#endif
 
 	default:
 		break;
@@ -941,6 +1081,10 @@ static int msm_actuator_close(struct v4l2_subdev *sd,
 		pr_err("failed\n");
 		return -EINVAL;
 	}
+#ifdef CONFIG_MACH_APQ8084_EF67
+	mutex_lock(a_ctrl->actuator_mutex);
+	msm_actuator_ois_reset(a_ctrl);
+#endif
 	if (a_ctrl->act_device_type == MSM_CAMERA_PLATFORM_DEVICE) {
 		rc = a_ctrl->i2c_client.i2c_func_tbl->i2c_util(
 			&a_ctrl->i2c_client, MSM_CCI_RELEASE);
@@ -950,6 +1094,9 @@ static int msm_actuator_close(struct v4l2_subdev *sd,
 	kfree(a_ctrl->i2c_reg_tbl);
 	a_ctrl->i2c_reg_tbl = NULL;
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+	mutex_unlock(a_ctrl->actuator_mutex);
+#endif
 	CDBG("Exit\n");
 	return rc;
 }

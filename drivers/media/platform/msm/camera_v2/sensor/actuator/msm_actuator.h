@@ -105,6 +105,12 @@ struct msm_actuator_ctrl_t {
 	uint32_t valid_position;
 	struct park_lens_data_t park_lens;
 	uint32_t max_code_size;
+#ifdef CONFIG_MACH_APQ8084_EF67
+	bool ois_initialized;
+	bool ois_ready;
+	bool ois_info_enabled;
+	int ois_mode;
+#endif
 };
 
 #endif

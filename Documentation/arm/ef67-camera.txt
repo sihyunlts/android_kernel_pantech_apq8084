@@ -4,9 +4,9 @@ EF67S camera support
 Target: IM-A930S, stock firmware S0226114.
 
 This restores stock camera GPIO mappings, EEPROM clock/power handling,
-userspace command layouts, image updates and rear lens transmission.
-DTS voltages, regulators, GPIOs and delays are unchanged. Dedicated OIS
-mode and information commands are not implemented.
+userspace command layouts, image updates, rear lens transmission and OIS
+mode/information commands. DTS voltages, regulators, GPIOs and power
+sequence delays are unchanged.
 
 Stock GPIO sequence ABI
 ----------------------
@@ -80,8 +80,9 @@ checks. EF67 zImage/dtbs and the common camera subtree with EF67 disabled
 built successfully.
 
 Hardware testing with the stock ROM confirms front/rear preview, restored
-colors and preview rate, rear focus and OIS operation. This does not verify
-still/video capture, every OIS mode, or long-term stability.
+colors and preview rate, still/video capture, rear focus and basic OIS
+operation. The additional OIS commands below still need device testing,
+as do quantitative comparisons across modes and long-term stability.
 
 References:
   https://www.kernel.org/doc/Documentation/gpio/gpio-legacy.txt
@@ -140,14 +141,14 @@ Stock msm_actuator_init_focus at 0xc06e4f38 selects each initialization
 entry's address size and restores the original client size afterward.
 Writes to register 0x2c0 use WORD_DATA. Writes do not fall through into a
 poll. Restore those EF67 behaviors while keeping requested delays and
-propagating transport errors. OIS control commands have not been added.
+propagating transport errors.
 
 Extracted-function checks pass for both EF67 and common configurations:
 DAC byte order and masked bits, per-entry address/data widths, the 0x2c0
 word write, write/poll separation, transport errors and address restore.
 The user confirms rear focus, colors, preview rate and OIS appear normal.
 Device logs contain no VFE ping-pong mismatch or lens-write/park failure.
-This does not verify all modes: stock OIS control/info commands are absent.
+Those device tests did not exercise the additional OIS commands below.
 
 Stock focus movement
 --------------------
@@ -164,3 +165,46 @@ targets, invalid directions/ranges and transport failures with EF67
 enabled and disabled. The user confirms focus, colors and OIS remain
 normal after this follow-up. All 195 captured focus moves return zero,
 with no image-buffer, lens initialization or move failure in the log.
+
+Stock OIS mode and information commands
+---------------------------------------
+
+S0226114 msm_actuator_subdev_ioctl at 0xc06e6304 dispatches command 8 to
+the OIS mode setter, 9 to information control and 10 to information read.
+All use the existing 200-byte request, union offset 8 and ioctl 0xc0c856c6.
+Mode is a u16 at offset 8. Information control is a u32 at offset 8;
+measurement words for registers 0x86, 0x88, 0x8e and 0x90 occupy offsets
+12, 14, 16 and 18. Adding these union members does not change request size.
+
+pantech_OIS_set_mode at 0xc06e7934 stops through register 0 (byte 0),
+waits 1 ms and reads status register 1 up to ten times until it is 0 or 1,
+waiting 10 ms after each busy result. It writes mode register 2 (byte 5
+for centering mode 0; byte 0/1 for modes 1/2), then starts through register
+0 (byte 1). Preserve the register sequence and busy-wait delays. No mode
+write is added to the ordinary initialization unless userspace requested
+a mode. Requests between CCI initialization and lens setup are deferred
+until the lens address and initialization table are successfully set.
+
+pantech_OIS_info_ctrl at 0xc06e7620 writes byte 0/1 to register 0x80 and
+updates the enabled state only after successful transmission. The read
+at 0xc06e7674 preserves all output fields if information is disabled or
+status register 1 is not 2. Otherwise it reads word registers in order
+0x86, 0x8e, 0x88, 0x90, swaps each word's bytes and preserves the control
+word. Each measurement is preceded by 1 ms; the final read also has a
+following 1 ms delay. Errors preserve already-read fields as in stock.
+
+State belongs to each actuator and is reset on initialization, powerdown
+and close. Serialize close with configuration so OIS reads cannot race
+CCI release. Unlike stock, reject unsupported modes/control values before
+any I2C access, propagate read/mode-write errors instead of overwriting
+them with a later success, report ETIMEDOUT on polling exhaustion, and
+reject information access before successful transport/lens setup with
+EPIPE. These checks do not change successful initialized requests.
+
+Actual stock ARM functions and extracted C match in 29 cases covering
+all three modes, delayed readiness, information toggles, idle status,
+byte order, field positions and read/write failures. Separate checks
+cover deferred mode requests, setup failures, failed information toggles,
+shutdown/close/reopen and mutex handling. GCC 4.7 ARM actuator builds and
+request-layout checks pass with EF67 enabled and disabled. These are
+software checks; command 8/9/10 operation on the device is not yet verified.

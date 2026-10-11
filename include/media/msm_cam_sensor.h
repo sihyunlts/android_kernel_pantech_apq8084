@@ -514,6 +514,11 @@ enum msm_actuator_cfg_type_t {
 	CFG_ACTUATOR_POWERDOWN,
 	CFG_ACTUATOR_POWERUP,
 	CFG_ACTUATOR_INIT,
+#ifdef CONFIG_MACH_APQ8084_EF67
+	CFG_ACTUATOR_OIS_SET_MODE,
+	CFG_ACTUATOR_OIS_INFO_CTRL,
+	CFG_ACTUATOR_OIS_GET_INFO,
+#endif
 };
 
 enum actuator_type {
@@ -635,6 +640,17 @@ struct msm_actuator_set_position_t {
 	uint16_t delay[MAX_NUMBER_OF_STEPS];
 };
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+/* S0226114 returns four raw OIS register words after the control word. */
+struct msm_actuator_ois_info {
+	uint32_t control;
+	uint16_t reg_86;
+	uint16_t reg_88;
+	uint16_t reg_8e;
+	uint16_t reg_90;
+};
+#endif
+
 struct msm_actuator_cfg_data {
 	int cfgtype;
 	uint8_t is_af_supported;
@@ -644,6 +660,10 @@ struct msm_actuator_cfg_data {
 		struct msm_actuator_get_info_t get_info;
 		struct msm_actuator_set_position_t setpos;
 		enum af_camera_name cam_name;
+#ifdef CONFIG_MACH_APQ8084_EF67
+		uint16_t ois_mode;
+		struct msm_actuator_ois_info ois_info;
+#endif
 	} cfg;
 };
 
