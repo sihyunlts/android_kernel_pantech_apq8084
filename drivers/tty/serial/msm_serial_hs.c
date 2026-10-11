@@ -3054,6 +3054,8 @@ static int device_id_grab_next_free(void)
 static int device_id_set_used(int index)
 {
 	int ret = 0;
+	if (index < 0 || index >= UARTDM_NR)
+		return -EINVAL;
 	mutex_lock(&mutex_next_device_id);
 	if (deviceid[index])
 		ret = -ENODEV;
@@ -3061,6 +3063,15 @@ static int device_id_set_used(int index)
 		deviceid[index] = true;
 	mutex_unlock(&mutex_next_device_id);
 	return ret;
+}
+
+static void msm_hs_release_device_id(struct device *dev, void *resource)
+{
+	int index = *(int *)resource;
+
+	mutex_lock(&mutex_next_device_id);
+	deviceid[index] = false;
+	mutex_unlock(&mutex_next_device_id);
 }
 
 static int msm_hs_probe(struct platform_device *pdev)
@@ -3075,14 +3086,21 @@ static int msm_hs_probe(struct platform_device *pdev)
 	unsigned long data;
 
 	if (pdev->dev.of_node) {
+		int *reserved_id;
+
 		dev_dbg(&pdev->dev, "device tree enabled\n");
 		pdata = msm_hs_dt_to_pdata(pdev);
 		if (IS_ERR(pdata))
 			return PTR_ERR(pdata);
 
+		reserved_id = devres_alloc(msm_hs_release_device_id,
+					 sizeof(*reserved_id), GFP_KERNEL);
+		if (!reserved_id)
+			return -ENOMEM;
 		if (pdev->id < 0) {
 			pdev->id = device_id_grab_next_free();
 			if (pdev->id < 0) {
+				devres_free(reserved_id);
 				dev_err(&pdev->dev,
 					"Error grabbing next free device id");
 				return pdev->id;
@@ -3090,11 +3108,15 @@ static int msm_hs_probe(struct platform_device *pdev)
 		} else {
 			ret = device_id_set_used(pdev->id);
 			if (ret < 0) {
+				devres_free(reserved_id);
 				dev_err(&pdev->dev, "%d alias taken",
 					pdev->id);
 				return ret;
 			}
 		}
+		/* Probe deferral and removal must release the port number too. */
+		*reserved_id = pdev->id;
+		devres_add(&pdev->dev, reserved_id);
 		pdev->dev.platform_data = pdata;
 	}
 
