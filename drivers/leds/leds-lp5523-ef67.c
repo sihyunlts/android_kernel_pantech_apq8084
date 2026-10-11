@@ -11,6 +11,7 @@
 #include <linux/delay.h>
 #include <linux/gpio.h>
 #include <linux/i2c.h>
+#include <linux/jiffies.h>
 #include <linux/leds.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -57,6 +58,7 @@ struct ef67_led_chip {
 	struct i2c_client *client;
 	struct ef67_led leds[EF67_LED_CHANNELS];
 	struct workqueue_struct *queue;
+	struct delayed_work rgb_fade_off_work;
 	struct mutex lock;
 	spinlock_t state_lock;
 	u8 values[EF67_LED_CHANNELS];
@@ -132,6 +134,20 @@ static int ef67_led_clear_rgb(struct ef67_led_chip *chip)
 		chip->applied[ef67_rgb_channels[i]] = 0;
 	}
 	return 0;
+}
+
+static void ef67_led_fade_off_work(struct work_struct *work)
+{
+	struct ef67_led_chip *chip = container_of(to_delayed_work(work),
+				struct ef67_led_chip, rgb_fade_off_work);
+	int ret;
+
+	mutex_lock(&chip->lock);
+	ret = ef67_led_clear_rgb(chip);
+	if (ret)
+		dev_err_ratelimited(&chip->client->dev,
+				   "Cannot turn RGB off after fade: %d\n", ret);
+	mutex_unlock(&chip->lock);
 }
 
 static int ef67_led_load_program(struct ef67_led_chip *chip,
@@ -322,11 +338,21 @@ static int ef67_led_pattern(struct ef67_led_chip *chip, const u8 *values,
 		engines |= 0x20 >> (engine * 2);
 	}
 	ret = ef67_led_run_engines(chip, engines);
-	if (!ret && command == EF67_RGB_FADE)
+	if (!ret && command == EF67_RGB_FADE) {
 		for (engine = 0; engine < ARRAY_SIZE(ef67_rgb_channels); engine++) {
 			channel = ef67_rgb_channels[engine];
 			chip->applied[channel] = values[channel];
 		}
+		if (!values[6] && !values[0] && !values[1]) {
+			/* Stock clears PWM even when no fade ramp ran. */
+			unsigned int delay_ms = values[7] ?
+					250U * values[7] + 100 : 500;
+
+			queue_delayed_work(chip->queue,
+					   &chip->rgb_fade_off_work,
+					   msecs_to_jiffies(delay_ms));
+		}
+	}
 	return ret;
 }
 
@@ -384,6 +410,9 @@ static void ef67_led_work(struct work_struct *work)
 	int ret;
 
 	mutex_lock(&chip->lock);
+	/* Cancel old fade-off before a new RGB command. */
+	if (request->channel == 8)
+		cancel_delayed_work(&chip->rgb_fade_off_work);
 	ret = ef67_led_apply(request);
 	if (ret) {
 		/* A partly loaded RGB program must not keep executing. */
@@ -570,6 +599,9 @@ static void ef67_led_unregister(struct ef67_led_chip *chip, unsigned int count)
 				   &ef67_led_attribute_group);
 		led_classdev_unregister(&chip->leds[count].cdev);
 	}
+	/* Queued commands can still arm fade-off while they drain. */
+	flush_workqueue(chip->queue);
+	cancel_delayed_work_sync(&chip->rgb_fade_off_work);
 	destroy_workqueue(chip->queue);
 	gpio_set_value_cansleep(chip->enable_gpio, 0);
 }
@@ -611,6 +643,7 @@ static int ef67_led_probe(struct i2c_client *client,
 		return ret;
 	mutex_init(&chip->lock);
 	spin_lock_init(&chip->state_lock);
+	INIT_DELAYED_WORK(&chip->rgb_fade_off_work, ef67_led_fade_off_work);
 	chip->queue = alloc_ordered_workqueue("ef67-lp5523", WQ_MEM_RECLAIM);
 	if (!chip->queue)
 		return -ENOMEM;
@@ -666,6 +699,7 @@ static void ef67_led_shutdown(struct i2c_client *client)
 	chip->stopping = true;
 	spin_unlock_irqrestore(&chip->state_lock, flags);
 	flush_workqueue(chip->queue);
+	cancel_delayed_work_sync(&chip->rgb_fade_off_work);
 	mutex_lock(&chip->lock);
 	gpio_set_value_cansleep(chip->enable_gpio, 0);
 	mutex_unlock(&chip->lock);
