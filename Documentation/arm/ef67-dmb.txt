@@ -1,0 +1,65 @@
+Pantech EF67 FC8080 terrestrial DMB
+=================================
+
+The EF67 DMB receiver uses BLSP1 QUP1 SPI, mode 0, 8-bit words,
+10.8MHz maximum bus speed, GPIO 75 for a falling-edge interrupt and
+GPIO 13 for chip enable. The S0226114 stock clock lookup is
+clk_get_sys("dmb_clk", "xo"), backed by the RPM RF_CLK1 buffer.
+
+Power sequence: chip enable high, 5ms delay, XO prepare/enable,
+30ms delay. Power off: chip enable low, 1ms delay, XO disable/unprepare.
+No regulator voltage is programmed by this driver. Probe leaves power off.
+
+/dev/tdmb preserves the stock ioctl encodings ('t', commands 0 through 28).
+The encoded size is one byte for many commands, but the stock payloads
+are 4-byte scalars or larger structures. Do not change those ioctl numbers.
+ARM payload sizes are: frequency 12, scan 12, channel 28, global-variable
+12, FIC 388, signal quality 20 and stream packet 12684 bytes. A successful
+read copies the stream packet and returns zero, as stock does. Stock
+libdmb_service.so DMBTuner::BB_ReadMSC requests 15756 bytes. This count is
+the userspace buffer capacity, not the exact kernel packet size: cap the
+copy at 12684 bytes instead of rejecting the valid larger buffer.
+
+The stream packet includes type, FIC size/data and MSC size/data. Unlike
+the MSM8974 reference, EF67's read_msc receives the whole packet address.
+Scan interrupts retain FIC for READ_FIB. Playback packets wake blocking
+readers and generate SIGIO. Buffered packets are consumed once; shutdown
+and removal wake readers. IRQ, control and data access share one mutex.
+
+The FCI chip library and Korean channel/factory tables originate from
+VegaDevTeam/android_kernel_pantech_msm8974, revision
+76c11b449f0fa6cfe035c0bd0334041a378635fa, drivers/dmb. Original attribution
+is retained. Only FC8080, SPI and 19.2MHz paths are included.
+
+EF67-specific board and stream behavior follows the S0226114 kernel.
+Initialization (63 register/delay operations), channel select/deselect,
+tuner initialization and all 21 Korean frequencies match stock function
+traces. Ioctl numbers/payload sizes and complete FIC/MSC packet contents
+were compared with the stock binary, including FIFO wrap/full handling.
+
+Safety differences: failed SPI operations cannot report successful
+initialization; transfers use complete zero-padded DMA buffers; interrupt
+lengths and user copies are bounded; a second open cannot power off the
+first client; reader/IRQ shutdown is serialized. The stock chip-probe
+retry sequence remains, with failure reported after all ten retries.
+Unused EBI/TSIF/I2C host drivers, boot tests, dumps and timing logs are
+excluded. The legacy EBI command copies through a checked userspace
+buffer instead of treating its payload as a kernel pointer.
+
+GCC 4.7 ARM kernel (zImage) and EF67 device tree compilation passed.
+SPI transfer boundary and error-injection checks passed; extracted power
+lifecycle checks cover clock/init failures and repeated shutdown.
+On IM-A930S, station listing, IRQ activity and valid signal measurements
+were observed. Playback failed with EINVAL because the initial read count
+check rejected the stock library request. Native library call emulation
+reproduces that failure and verifies the corrected capacity handling,
+including FIC/MSC payload and untouched bytes beyond the kernel packet.
+The user confirmed operation after the read-capacity correction.
+Repeated start/stop and controlled reception comparisons remain to test.
+
+Final review repeated chip/register/delay comparison across 126 cases
+and signal-quality/antenna-bar calculations across 57 inputs against
+S0226114. Channel restart clears cached packets and receive errors;
+failed restart wakes waiting readers. Factory NETBER ignores uninitialized
+or empty samples to prevent division by zero, preserving valid results.
+Final GCC 4.7 ARM DMB driver compilation passed.

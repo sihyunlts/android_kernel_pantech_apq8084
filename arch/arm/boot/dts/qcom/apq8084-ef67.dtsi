@@ -941,12 +941,10 @@
 		compatible = "dmb,dmb_spi";
 		reg = <0x00>;
 		spi-max-frequency = <0xa4cb80>;
-		#spi-cpol;
-		#spi-cpha;
-		#spi-cs-high;
 		interrupt-parent = <&msmgpio>;
 		interrupts = <0x4b 0x00>;
 		dmb,irq-gpio = <&msmgpio 0x4b 0>;
+		dmb,power-gpio = <&msmgpio 13 0>;
 		#interrupt-names = "irq_gpio";
 		dmb,gpios = <&msmgpio 0x03 0x00 &msmgpio 0x01 0x00 &msmgpio 0x00 0x00>;
 		dmb,cs-gpios = <&msmgpio 0x2 0>;

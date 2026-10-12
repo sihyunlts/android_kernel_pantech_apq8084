@@ -1,0 +1,5 @@
+config EF67_DMB
+        bool "Pantech EF67 FC8080 terrestrial DMB"
+        depends on MACH_APQ8084_EF67 && SPI
+        help
+          FC8080 receiver on BLSP1 QUP1, with the stock /dev/tdmb interface.

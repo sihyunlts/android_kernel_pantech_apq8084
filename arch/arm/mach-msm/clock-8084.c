@@ -5927,6 +5927,9 @@ static struct clk_lookup apq_clocks_8084[] = {
 	CLK_LOOKUP("ref_clk",            bb_clk2_a_pin.c, "3-000e"),
 #ifdef CONFIG_MACH_APQ8084_EF67
 	CLK_LOOKUP("xo",                 bb_clk2_pin.c, "pn547"),
+#ifdef CONFIG_EF67_DMB
+	CLK_LOOKUP("xo", rf_clk1.c, "dmb_clk"),
+#endif
 #endif
 	/* RPM clocks */
 	CLK_LOOKUP("bus_clk", snoc_clk.c, ""),
