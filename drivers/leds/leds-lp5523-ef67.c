@@ -18,6 +18,7 @@
 #include <linux/of_gpio.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
+#include <soc/qcom/smem.h>
 
 #define EF67_LED_CHANNELS	9
 #define EF67_PROGRAM_SIZE	32
@@ -25,6 +26,7 @@
 #define LP5523_OP_MODE		0x01
 #define LP5523_ENABLE_MSB		0x04
 #define LP5523_ENABLE_LSB		0x05
+#define LP5523_LED_CONTROL	0x06
 #define LP5523_PWM		0x16
 #define LP5523_CURRENT		0x26
 #define LP5523_CONFIG		0x36
@@ -78,6 +80,12 @@ struct ef67_led_request {
 
 /* Engine 1 = red/D7, engine 2 = green/D1, engine 3 = blue/D2. */
 static const u8 ef67_rgb_channels[] = { 6, 0, 1 };
+
+/* S stock pan_led_pattern_offline_charging, 0xc12ee694. */
+static const u8 ef67_offline_charging_program[EF67_PROGRAM_SIZE] = {
+	0x00, 0x40, 0x9c, 0x00, 0x1e, 0xe0, 0x54, 0x00,
+	0x1f, 0xe0, 0x54, 0x00, 0xa0, 0x02,
+};
 
 /* S stock pan_led_pattern_pwm_repeat, 0xc12ee6d8. */
 static const u8 ef67_blink_programs[][EF67_PROGRAM_SIZE] = {
@@ -183,6 +191,37 @@ static int ef67_led_run_engines(struct ef67_led_chip *chip, u8 engines)
 	ret = ef67_led_write(chip, LP5523_OP_MODE, engines);
 	usleep_range(1000, 2000);
 	return ret;
+}
+
+/* S stock pan_led_offline_red_charging, 0xc0793968. */
+static int ef67_led_start_offline_charging(struct ef67_led_chip *chip)
+{
+	unsigned int i;
+	int ret;
+
+	ret = ef67_led_stop_engines(chip);
+	if (ret)
+		return ret;
+	for (i = 0; i < EF67_LED_CHANNELS; i++) {
+		ret = ef67_led_write(chip, LP5523_PWM + i, 0);
+		if (ret)
+			return ret;
+	}
+	/* Stock enables logarithmic brightness except on the touchkey outputs. */
+	for (i = 0; i < EF67_LED_CHANNELS; i++) {
+		if (i == 4 || i == 5)
+			continue;
+		ret = ef67_led_write(chip, LP5523_LED_CONTROL + i, BIT(5));
+		if (ret)
+			return ret;
+	}
+	ret = ef67_led_write(chip, LP5523_PWM + 6, 31);
+	if (ret)
+		return ret;
+	ret = ef67_led_load_program(chip, 0, ef67_offline_charging_program);
+	if (ret)
+		return ret;
+	return ef67_led_run_engines(chip, 0x20);
 }
 
 /* Stock timing: channel2 is in 10ms units, channel3 in 100ms units. */
@@ -611,6 +650,8 @@ static int ef67_led_probe(struct i2c_client *client,
 {
 	struct device *dev = &client->dev;
 	struct ef67_led_chip *chip;
+	const u32 *boot_data;
+	unsigned int boot_data_size = 0;
 	u32 clock, channels, led_current, max_current, touchkeys[2];
 	int ret, i;
 
@@ -627,6 +668,16 @@ static int ef67_led_probe(struct i2c_client *client,
 	if (clock != 1 || channels != EF67_LED_CHANNELS || !led_current ||
 	    led_current > max_current || max_current > 255 ||
 	    touchkeys[0] != 4 || touchkeys[1] != 5)
+		return -EINVAL;
+
+	/* Read the existing S/L boot data; do not allocate or overwrite it. */
+	boot_data = smem_get_entry(SMEM_ID_VENDOR1, &boot_data_size, 0,
+				   SMEM_ANY_HOST_FLAG);
+	if (IS_ERR(boot_data))
+		return PTR_ERR(boot_data);
+	if (!boot_data)
+		return -ENODATA;
+	if (boot_data_size != 40 && boot_data_size != 48)
 		return -EINVAL;
 
 	chip = devm_kzalloc(dev, sizeof(*chip), GFP_KERNEL);
@@ -653,6 +704,12 @@ static int ef67_led_probe(struct i2c_client *client,
 	ret = ef67_led_init(chip);
 	if (ret)
 		goto fail;
+	/* Both S and L stock test power_on_mode at byte offset 16 for zero. */
+	if (!boot_data[4]) {
+		ret = ef67_led_start_offline_charging(chip);
+		if (ret)
+			goto fail;
+	}
 	for (i = 0; i < EF67_LED_CHANNELS; i++) {
 		struct ef67_led *led = &chip->leds[i];
 
