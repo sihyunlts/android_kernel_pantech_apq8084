@@ -33,9 +33,16 @@ Description:
 		a scalar mode: 0 finger, 1 glove, 2 stylus, 3 stylus_draw.
 		Command 6004 copies the selected mode to a userspace int pointer.
 		Selection uses the same control path as the sysfs attribute.
+		Command 6001 also accepts scalar 10 (normal screen) and 11
+		(cover window). These leave the finger/glove/stylus selection
+		unchanged. Command 6004 adds 10 when cover-window mode is selected.
+		The cover window accepts Y 0 through 1250, matching S0226114.
+		Smart-cover SW_LID changes release contacts and temporarily
+		apply the sensor state; after 500ms the requested window mode
+		is restored. No controller firmware or NVM is changed.
 
 		Invalid modes return EINVAL, bad pointers EFAULT and unsupported
 		commands ENOTTY. Transport failures are propagated. Device removal
-		makes existing files return ENODEV. Cover-mode and debugging
-		commands are not implemented. The device is created with mode
+		makes existing files return ENODEV. Debugging commands are not
+		implemented. The device is created with mode
 		0600; stock init applies its system:radio 0660 permissions.

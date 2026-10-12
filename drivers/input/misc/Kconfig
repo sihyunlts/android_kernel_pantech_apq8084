@@ -12,6 +12,13 @@ menuconfig INPUT_MISC
 
 if INPUT_MISC
 
+config INPUT_EF67_SMART_COVER
+	bool "Pantech EF67 smart cover"
+	depends on MACH_APQ8084_EF67 && OF && GPIOLIB
+	help
+	  Report SW_LID and provide the stock gpio_switch_dev controls for
+	  enabling and disabling the smart-cover sensor.
+
 config INPUT_88PM860X_ONKEY
 	tristate "88PM860x ONKEY support"
 	depends on MFD_88PM860X

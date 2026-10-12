@@ -1,0 +1,20 @@
+Pantech EF67 smart-cover sensor
+
+Required properties:
+- compatible: "pantech,ef67-smart-cover"
+- child node cover:
+  - gpios: sensor GPIO with active-low flag on EF67S (MSM GPIO9)
+  - debounce-interval: interval in milliseconds between stable-state samples
+
+The driver reports the stock smart_cover EV_SW/SW_LID input device and
+provides /dev/gpio_switch_dev for sensor enable/disable. Wakeup is enabled
+while the sensor is enabled. See Documentation/ABI/testing/ef67-stock-controls.
+
+Example:
+smart_cover {
+	compatible = "pantech,ef67-smart-cover";
+	cover {
+		gpios = <&msmgpio 9 1>;
+		debounce-interval = <10>;
+	};
+};

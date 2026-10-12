@@ -98,6 +98,12 @@ struct ef67_mxt {
 	bool scanning;
 	bool asleep;
 	bool stopping;
+	bool cover_forced;
+	bool cover_window;
+	bool cover_sensor;
+	struct input_handler cover_handler;
+	struct work_struct cover_work;
+	struct delayed_work cover_restore;
 #ifdef CONFIG_FB
 	struct notifier_block fb_notifier;
 #endif
@@ -423,7 +429,9 @@ static void ef67_mxt_report_touch(struct ef67_mxt *touch, const u8 *message)
 	     type != EF67_MXT_T100_STYLUS &&
 	     type != EF67_MXT_T100_HOVER &&
 	     type != EF67_MXT_T100_GLOVE) ||
-	    x > EF67_MXT_SCREEN_X || y > EF67_MXT_SENSOR_Y) {
+	    x > EF67_MXT_SCREEN_X || y > EF67_MXT_SENSOR_Y ||
+	    ((ACCESS_ONCE(touch->cover_window) || ACCESS_ONCE(touch->cover_forced)) &&
+	     y > 1250)) {
 		ef67_mxt_release_contact(touch, id);
 		return;
 	}
@@ -619,6 +627,98 @@ out:
 	return ret;
 }
 
+static void ef67_mxt_cover_restore(struct work_struct *work)
+{
+	struct ef67_mxt *touch = container_of(to_delayed_work(work),
+				struct ef67_mxt, cover_restore);
+
+	mutex_lock(&touch->lock);
+	ACCESS_ONCE(touch->cover_window) = touch->cover_forced;
+	mutex_unlock(&touch->lock);
+}
+
+static void ef67_mxt_cover_work(struct work_struct *work)
+{
+	struct ef67_mxt *touch = container_of(work, struct ef67_mxt, cover_work);
+	bool irq_enabled;
+
+	mutex_lock(&touch->lock);
+	ACCESS_ONCE(touch->cover_window) = ACCESS_ONCE(touch->cover_sensor);
+	if (!touch->stopping && !touch->asleep) {
+		/* Stock releases contacts and restores the requested mode after 500 ms. */
+		irq_enabled = touch->irq_enabled;
+		ef67_mxt_disable_irq(touch);
+		ef67_mxt_release_all(touch);
+		if (irq_enabled) {
+			enable_irq(touch->client->irq);
+			touch->irq_enabled = true;
+		}
+		mod_delayed_work(system_wq, &touch->cover_restore,
+				 msecs_to_jiffies(500));
+	}
+	mutex_unlock(&touch->lock);
+}
+
+static void ef67_mxt_cover_event(struct input_handle *handle,
+			       unsigned int type, unsigned int code, int value)
+{
+	struct ef67_mxt *touch = handle->private;
+
+	if (type != EV_SW || code != SW_LID)
+		return;
+	ACCESS_ONCE(touch->cover_sensor) = !!value;
+	ACCESS_ONCE(touch->cover_window) = !!value;
+	schedule_work(&touch->cover_work);
+}
+
+static bool ef67_mxt_cover_match(struct input_handler *handler,
+			       struct input_dev *dev)
+{
+	return dev->name && !strcmp(dev->name, "smart_cover");
+}
+
+static int ef67_mxt_cover_connect(struct input_handler *handler,
+		struct input_dev *dev, const struct input_device_id *id)
+{
+	struct ef67_mxt *touch = handler->private;
+	struct input_handle *handle;
+	int ret;
+
+	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
+	if (!handle)
+		return -ENOMEM;
+	handle->dev = dev;
+	handle->handler = handler;
+	handle->name = "ef67-touch-cover";
+	handle->private = touch;
+	ret = input_register_handle(handle);
+	if (ret)
+		goto free_handle;
+	ret = input_open_device(handle);
+	if (ret) {
+		input_unregister_handle(handle);
+		goto free_handle;
+	}
+	ef67_mxt_cover_event(handle, EV_SW, SW_LID, test_bit(SW_LID, dev->sw));
+	return 0;
+free_handle:
+	kfree(handle);
+	return ret;
+}
+
+static void ef67_mxt_cover_disconnect(struct input_handle *handle)
+{
+	input_close_device(handle);
+	input_unregister_handle(handle);
+	kfree(handle);
+}
+
+static const struct input_device_id ef67_mxt_cover_ids[] = {
+	{ .flags = INPUT_DEVICE_ID_MATCH_EVBIT | INPUT_DEVICE_ID_MATCH_SWBIT,
+	  .evbit = { BIT_MASK(EV_SW) }, .swbit = { BIT_MASK(SW_LID) } },
+	{ }
+};
+
 static ssize_t touch_mode_store(struct device *dev,
 			       struct device_attribute *attribute,
 			       const char *buffer, size_t count)
@@ -677,12 +777,21 @@ static long ef67_mxt_control_ioctl(struct file *file, unsigned int command,
 	switch (command) {
 	case EF67_MXT_SET_MODE:
 		/* Stock takes a scalar mode, not a user pointer. */
-		ret = argument >= ARRAY_SIZE(ef67_mxt_mode_names) ? -EINVAL :
-			ef67_mxt_set_mode(touch, argument);
+		if (argument == 10 || argument == 11) {
+			mutex_lock(&touch->lock);
+			ACCESS_ONCE(touch->cover_forced) = argument == 11;
+			ACCESS_ONCE(touch->cover_window) = touch->cover_forced;
+			cancel_delayed_work(&touch->cover_restore);
+			mutex_unlock(&touch->lock);
+			ret = 0;
+		} else {
+			ret = argument >= ARRAY_SIZE(ef67_mxt_mode_names) ? -EINVAL :
+				ef67_mxt_set_mode(touch, argument);
+		}
 		break;
 	case EF67_MXT_GET_MODE:
 		mutex_lock(&touch->lock);
-		mode = touch->mode;
+		mode = touch->mode + 10 * touch->cover_forced;
 		ret = touch->stopping ? -ENODEV : 0;
 		mutex_unlock(&touch->lock);
 		if (!ret && copy_to_user((void __user *)argument, &mode, sizeof(mode)))
@@ -858,6 +967,8 @@ static int ef67_mxt_probe(struct i2c_client *client,
 		return -ENOMEM;
 	touch->client = client;
 	mutex_init(&touch->lock);
+	INIT_WORK(&touch->cover_work, ef67_mxt_cover_work);
+	INIT_DELAYED_WORK(&touch->cover_restore, ef67_mxt_cover_restore);
 	i2c_set_clientdata(client, touch);
 	ret = ef67_mxt_setup_power(touch);
 	if (ret)
@@ -899,6 +1010,19 @@ static int ef67_mxt_probe(struct i2c_client *client,
 		sysfs_remove_group(&client->dev.kobj, &ef67_mxt_attribute_group);
 		goto unregister_fb;
 	}
+	touch->cover_handler.event = ef67_mxt_cover_event;
+	touch->cover_handler.match = ef67_mxt_cover_match;
+	touch->cover_handler.connect = ef67_mxt_cover_connect;
+	touch->cover_handler.disconnect = ef67_mxt_cover_disconnect;
+	touch->cover_handler.name = "ef67-touch-cover";
+	touch->cover_handler.id_table = ef67_mxt_cover_ids;
+	touch->cover_handler.private = touch;
+	ret = input_register_handler(&touch->cover_handler);
+	if (ret) {
+		ef67_mxt_unregister_control(touch);
+		sysfs_remove_group(&client->dev.kobj, &ef67_mxt_attribute_group);
+		goto unregister_fb;
+	}
 	dev_info(&client->dev, "EF67 mXT641T finger/glove/stylus input ready\n");
 	return 0;
 
@@ -922,6 +1046,9 @@ static int ef67_mxt_remove(struct i2c_client *client)
 
 	ef67_mxt_unregister_control(touch);
 	sysfs_remove_group(&client->dev.kobj, &ef67_mxt_attribute_group);
+	input_unregister_handler(&touch->cover_handler);
+	cancel_work_sync(&touch->cover_work);
+	cancel_delayed_work_sync(&touch->cover_restore);
 #ifdef CONFIG_FB
 	fb_unregister_client(&touch->fb_notifier);
 #endif

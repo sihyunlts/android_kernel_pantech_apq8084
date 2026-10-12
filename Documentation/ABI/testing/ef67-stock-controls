@@ -1,0 +1,13 @@
+What:		/dev/gpio_switch_dev
+Date:		October 2026
+Description:
+		EF67S smart-cover control used by S0226114 libsky_ctrl_drv.so.
+		ioctl 10 enables the sensor IRQ and wakeup; ioctl 11 disables
+		them and reports SW_LID open after cancelling pending debounce.
+		Repeated commands are supported. ioctl 0 changes only the stock
+		sub_smart_cover1_detection sensor, absent on EF67S, and is a no-op.
+		Unsupported commands return ENOTTY; removed devices return ENODEV.
+		Created with 0600; stock init sets system:radio 0660.
+		Input name smart_cover, GPIO9 active-low, both edges, two equal
+		samples separated by 10ms, and SW_LID closed=1/open=0 are preserved.
+		The jiffies/work scheduler does not guarantee exact sample timing.
