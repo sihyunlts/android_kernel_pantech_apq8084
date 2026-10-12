@@ -6,6 +6,13 @@ menuconfig SWITCH
 
 if SWITCH
 
+config SWITCH_EF67_PEN
+	bool "Pantech EF67 pen insertion switch"
+	depends on MACH_APQ8084_EF67 && OF && GPIOLIB
+	help
+	  Report the built-in pen's insertion state through the stock
+	  touch_pen_detection switch, including debounce and wakeup.
+
 config SWITCH_GPIO
 	tristate "GPIO Swith support"
 	depends on GPIOLIB

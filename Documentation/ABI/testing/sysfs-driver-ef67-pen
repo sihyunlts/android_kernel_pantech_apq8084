@@ -1,0 +1,25 @@
+What:           /sys/class/switch/touch_pen_detection/state
+Date:           October 2026
+KernelVersion:  3.10
+Description:
+                EF67 pen insertion state expected by the stock Android
+                android.policy.jar observer. GPIO 79 is read as an input
+                with pull-up and 2mA drive, then XORed with the DT flag (1).
+                Logical state 0 prints ON; state 1 prints OFF, including
+                a trailing newline. This matches S0226114's switch output.
+                A change emits a KOBJ_CHANGE uevent with SWITCH_NAME set
+                to touch_pen_detection and SWITCH_STATE set to ON or OFF.
+                The observer matches
+                DEVPATH=/devices/virtual/switch/touch_pen_detection.
+
+                The gpio_switch DT child supplies a plain GPIO number,
+                flag, event_mode (1 for switch) and debounce_time (10ms).
+                Initial state is sampled during probe. Subsequent edges
+                require two equal samples before notification. Both edges
+                wake the device; a 500ms wakeup event covers the debounce
+                and Android notification interval.
+
+                The input-mode smart_cover device is handled separately
+                by the EF67 smart-cover driver. Pen tip coordinates and
+                touch configuration are handled separately by the Atmel
+                touchscreen driver.
