@@ -490,6 +490,23 @@ long msm_isp_ioctl(struct v4l2_subdev *sd,
 		rc = msm_isp_smmu_attach(vfe_dev->buf_mgr, arg);
 		mutex_unlock(&vfe_dev->core_mutex);
 		break;
+#ifdef CONFIG_MACH_APQ8084_EF67
+	case VIDIOC_MSM_ISP_AXI_HALT:
+	case VIDIOC_MSM_ISP_AXI_RESET:
+	case VIDIOC_MSM_ISP_AXI_RESTART:
+		mutex_lock(&vfe_dev->core_mutex);
+		if (!vfe_dev->vfe_open_cnt || !vfe_dev->vfe_base) {
+			rc = -ENODEV;
+		} else if (cmd == VIDIOC_MSM_ISP_AXI_HALT) {
+			rc = msm_isp_axi_halt(vfe_dev, arg);
+		} else if (cmd == VIDIOC_MSM_ISP_AXI_RESET) {
+			rc = msm_isp_axi_reset(vfe_dev, arg);
+		} else {
+			rc = msm_isp_axi_restart(vfe_dev, arg);
+		}
+		mutex_unlock(&vfe_dev->core_mutex);
+		break;
+#endif
 	case MSM_SD_SHUTDOWN:
 		while (vfe_dev->vfe_open_cnt != 0)
 			msm_isp_close_node(sd, NULL);
@@ -1063,6 +1080,50 @@ static inline void msm_isp_update_error_info(struct vfe_device *vfe_dev,
 	vfe_dev->error_info.error_count++;
 }
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+/* S0226114 overflow detection at 0xc06f9894 sends event 0x08000004. */
+static void msm_isp_process_overflow_irq(struct vfe_device *vfe_dev,
+	uint32_t *irq_status0, uint32_t *irq_status1)
+{
+	const struct msm_vfe_recovery_ops *ops = vfe_dev->hw_info->recovery_ops;
+	struct msm_vfe_error_info *error = &vfe_dev->error_info;
+	struct msm_isp_event_data event;
+	struct msm_isp_timestamp ts;
+	unsigned long flags;
+
+	if (!ops)
+		return;
+	spin_lock_irqsave(&vfe_dev->shared_data_lock, flags);
+	if (atomic_read(&error->recovery_state) != VFE_RECOVERY_IDLE) {
+		/* Keep only reset and halt completion IRQs during recovery. */
+		*irq_status0 &= BIT(31);
+		*irq_status1 &= BIT(8);
+		spin_unlock_irqrestore(&vfe_dev->shared_data_lock, flags);
+		return;
+	}
+	if (vfe_dev->ignore_error || !vfe_dev->axi_data.num_active_stream ||
+	    !(*irq_status1 & ops->overflow_mask)) {
+		spin_unlock_irqrestore(&vfe_dev->shared_data_lock, flags);
+		return;
+	}
+	ops->get_irq_mask(vfe_dev, &error->saved_irq_mask0,
+		&error->saved_irq_mask1);
+	atomic_set(&error->recovery_state, VFE_RECOVERY_HALTED);
+	ops->halt(vfe_dev, 0);
+	vfe_dev->hw_info->vfe_ops.core_ops.update_camif_state(vfe_dev,
+		DISABLE_CAMIF_IMMEDIATELY);
+	spin_unlock_irqrestore(&vfe_dev->shared_data_lock, flags);
+	*irq_status0 = 0;
+	*irq_status1 = 0;
+	memset(&event, 0, sizeof(event));
+	msm_isp_get_timestamp(&ts);
+	event.timestamp = ts.event_time;
+	event.mono_timestamp = ts.buf_time;
+	event.frame_id = vfe_dev->axi_data.src_info[VFE_PIX_0].frame_id;
+	msm_isp_send_event(vfe_dev, ISP_EVENT_WM_BUS_OVERFLOW, &event);
+}
+#endif
+
 irqreturn_t msm_isp_process_irq(int irq_num, void *data)
 {
 	unsigned long flags;
@@ -1073,6 +1134,9 @@ irqreturn_t msm_isp_process_irq(int irq_num, void *data)
 
 	vfe_dev->hw_info->vfe_ops.irq_ops.
 		read_irq_status(vfe_dev, &irq_status0, &irq_status1);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	msm_isp_process_overflow_irq(vfe_dev, &irq_status0, &irq_status1);
+#endif
 	vfe_dev->hw_info->vfe_ops.core_ops.
 		get_error_mask(&error_mask0, &error_mask1);
 	error_mask0 &= irq_status0;
@@ -1143,6 +1207,11 @@ void msm_isp_do_tasklet(unsigned long data)
 			irq_status0, irq_status1);
 		irq_ops->process_halt_irq(vfe_dev,
 			irq_status0, irq_status1);
+#ifdef CONFIG_MACH_APQ8084_EF67
+		if (atomic_read(&vfe_dev->error_info.recovery_state) !=
+		    VFE_RECOVERY_IDLE)
+			continue;
+#endif
 		irq_ops->process_camif_irq(vfe_dev,
 			irq_status0, irq_status1, &ts);
 		irq_ops->process_axi_irq(vfe_dev,

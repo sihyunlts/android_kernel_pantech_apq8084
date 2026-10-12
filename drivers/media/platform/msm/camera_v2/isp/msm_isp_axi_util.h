@@ -41,6 +41,14 @@ int msm_isp_request_axi_stream(struct vfe_device *vfe_dev, void *arg);
 int msm_isp_cfg_axi_stream(struct vfe_device *vfe_dev, void *arg);
 int msm_isp_release_axi_stream(struct vfe_device *vfe_dev, void *arg);
 int msm_isp_update_axi_stream(struct vfe_device *vfe_dev, void *arg);
+#ifdef CONFIG_MACH_APQ8084_EF67
+int msm_isp_axi_halt(struct vfe_device *vfe_dev,
+	struct msm_vfe_axi_halt_cmd *cmd);
+int msm_isp_axi_reset(struct vfe_device *vfe_dev,
+	struct msm_vfe_axi_reset_cmd *cmd);
+int msm_isp_axi_restart(struct vfe_device *vfe_dev,
+	struct msm_vfe_axi_restart_cmd *cmd);
+#endif
 void msm_isp_axi_cfg_update(struct vfe_device *vfe_dev);
 
 void msm_isp_axi_stream_update(struct vfe_device *vfe_dev);

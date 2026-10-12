@@ -203,6 +203,23 @@ struct msm_vfe_ops {
 	struct msm_vfe_stats_ops stats_ops;
 };
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+struct msm_vfe_recovery_ops {
+	uint32_t overflow_mask;
+	void (*get_irq_mask)(struct vfe_device *, uint32_t *, uint32_t *);
+	int (*halt)(struct vfe_device *, uint32_t);
+	int (*reset)(struct vfe_device *, uint32_t);
+	void (*restart)(struct vfe_device *, uint32_t);
+};
+
+enum msm_vfe_recovery_state {
+	VFE_RECOVERY_IDLE,
+	VFE_RECOVERY_HALTED,
+	VFE_RECOVERY_RESETTING,
+	VFE_RECOVERY_READY,
+};
+#endif
+
 struct msm_vfe_hardware_info {
 	int num_iommu_ctx;
 	/* secure iommu ctx nums */
@@ -214,6 +231,9 @@ struct msm_vfe_hardware_info {
 	struct v4l2_subdev_internal_ops *subdev_internal_ops;
 	struct v4l2_subdev_ops *subdev_ops;
 	uint32_t dmi_reg_offset;
+#ifdef CONFIG_MACH_APQ8084_EF67
+	const struct msm_vfe_recovery_ops *recovery_ops;
+#endif
 };
 
 struct msm_vfe_axi_hardware_info {
@@ -393,6 +413,11 @@ struct msm_vfe_tasklet_queue_cmd {
 #define MSM_VFE_TASKLETQ_SIZE 200
 
 struct msm_vfe_error_info {
+#ifdef CONFIG_MACH_APQ8084_EF67
+	atomic_t recovery_state;
+	uint32_t saved_irq_mask0;
+	uint32_t saved_irq_mask1;
+#endif
 	uint32_t error_mask0;
 	uint32_t error_mask1;
 	uint32_t violation_status;

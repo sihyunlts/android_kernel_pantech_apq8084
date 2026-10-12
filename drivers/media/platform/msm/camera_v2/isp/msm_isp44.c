@@ -250,15 +250,26 @@ static void msm_vfe44_init_hardware_reg(struct vfe_device *vfe_dev)
 static void msm_vfe44_process_reset_irq(struct vfe_device *vfe_dev,
 	uint32_t irq_status0, uint32_t irq_status1)
 {
-	if (irq_status0 & (1 << 31))
+	if (irq_status0 & (1 << 31)) {
+#ifdef CONFIG_MACH_APQ8084_EF67
+		atomic_cmpxchg(&vfe_dev->error_info.recovery_state,
+			VFE_RECOVERY_RESETTING, VFE_RECOVERY_READY);
+#endif
 		complete(&vfe_dev->reset_complete);
+	}
 }
 
 static void msm_vfe44_process_halt_irq(struct vfe_device *vfe_dev,
 	uint32_t irq_status0, uint32_t irq_status1)
 {
-	if (irq_status1 & (1 << 8))
+	if (irq_status1 & (1 << 8)) {
 		complete(&vfe_dev->halt_complete);
+#ifdef CONFIG_MACH_APQ8084_EF67
+		if (atomic_read(&vfe_dev->error_info.recovery_state) !=
+		    VFE_RECOVERY_IDLE)
+			msm_camera_io_w_mb(0, vfe_dev->vfe_base + 0x2c0);
+#endif
+	}
 }
 
 static void msm_vfe44_process_camif_irq(struct vfe_device *vfe_dev,
@@ -738,6 +749,15 @@ static void msm_vfe44_update_camif_state(struct vfe_device *vfe_dev,
 		msm_camera_io_w_mb(0x0, vfe_dev->vfe_base + 0x2F4);
 		vfe_dev->axi_data.src_info[VFE_PIX_0].active = 0;
 	} else if (update_state == DISABLE_CAMIF_IMMEDIATELY) {
+#ifdef CONFIG_MACH_APQ8084_EF67
+		if (atomic_read(&vfe_dev->error_info.recovery_state) !=
+		    VFE_RECOVERY_IDLE) {
+			/* Recovery IRQs cannot wait; stock stops CAMIF without a reset. */
+			msm_camera_io_w_mb(0x6, vfe_dev->vfe_base + 0x2f4);
+			vfe_dev->axi_data.src_info[VFE_PIX_0].active = 0;
+			return;
+		}
+#endif
 		vfe_dev->ignore_error = 1;
 		vfe_dev->hw_info->vfe_ops.axi_ops.halt(vfe_dev);
 		msm_camera_io_w_mb(0x6, vfe_dev->vfe_base + 0x2F4);
@@ -987,6 +1007,84 @@ static long msm_vfe44_axi_halt(struct vfe_device *vfe_dev)
 	return wait_for_completion_interruptible_timeout(
 		&vfe_dev->halt_complete, msecs_to_jiffies(500));
 }
+
+#ifdef CONFIG_MACH_APQ8084_EF67
+static void msm_vfe44_recovery_get_irq_mask(struct vfe_device *vfe_dev,
+	uint32_t *mask0, uint32_t *mask1)
+{
+	*mask0 = msm_camera_io_r(vfe_dev->vfe_base + 0x28);
+	*mask1 = msm_camera_io_r(vfe_dev->vfe_base + 0x2c);
+}
+
+/* S stock msm_vfe44_axi_halt at 0xc06ff860. */
+static int msm_vfe44_recovery_halt(struct vfe_device *vfe_dev,
+	uint32_t blocking)
+{
+	long rc;
+
+	init_completion(&vfe_dev->halt_complete);
+	msm_camera_io_w(BIT(31), vfe_dev->vfe_base + 0x28);
+	msm_camera_io_w(BIT(8), vfe_dev->vfe_base + 0x2c);
+	msm_camera_io_w(0x7fffffff, vfe_dev->vfe_base + 0x30);
+	msm_camera_io_w(0xfffffeff, vfe_dev->vfe_base + 0x34);
+	msm_camera_io_w_mb(1, vfe_dev->vfe_base + 0x24);
+	msm_camera_io_w_mb(1, vfe_dev->vfe_base + 0x2c0);
+	if (!blocking)
+		return 0;
+	rc = wait_for_completion_timeout(&vfe_dev->halt_complete,
+		msecs_to_jiffies(500));
+	return rc ? 0 : -ETIMEDOUT;
+}
+
+/* S stock recovery reset uses 0x1ef, preserving the AXI bridge. */
+static int msm_vfe44_recovery_reset(struct vfe_device *vfe_dev,
+	uint32_t blocking)
+{
+	long rc;
+
+	init_completion(&vfe_dev->reset_complete);
+	msm_camera_io_w_mb(0x1ef, vfe_dev->vfe_base + 0x0c);
+	msm_camera_io_w(0x7fffffff, vfe_dev->vfe_base + 0x30);
+	msm_camera_io_w(0xfefffeff, vfe_dev->vfe_base + 0x34);
+	msm_camera_io_w_mb(1, vfe_dev->vfe_base + 0x24);
+	vfe_dev->hw_info->vfe_ops.axi_ops.reload_wm(vfe_dev, 0x3ffff);
+	if (!blocking)
+		return 0;
+	rc = wait_for_completion_timeout(&vfe_dev->reset_complete,
+		msecs_to_jiffies(200));
+	return rc ? 0 : -ETIMEDOUT;
+}
+
+/* S stock msm_vfe44_axi_restart at 0xc06ff7b0. */
+static void msm_vfe44_recovery_restart(struct vfe_device *vfe_dev,
+	uint32_t enable_camif)
+{
+	msm_camera_io_w(vfe_dev->error_info.saved_irq_mask0,
+		vfe_dev->vfe_base + 0x28);
+	msm_camera_io_w(vfe_dev->error_info.saved_irq_mask1,
+		vfe_dev->vfe_base + 0x2c);
+	msm_camera_io_w(0x7fffffff, vfe_dev->vfe_base + 0x30);
+	msm_camera_io_w(0xfefffeff, vfe_dev->vfe_base + 0x34);
+	msm_camera_io_w_mb(1, vfe_dev->vfe_base + 0x24);
+	msm_camera_io_w_mb(0, vfe_dev->vfe_base + 0x2c0);
+	vfe_dev->hw_info->vfe_ops.core_ops.reg_update(vfe_dev);
+	memset(&vfe_dev->error_info, 0, sizeof(vfe_dev->error_info));
+	if (enable_camif) {
+		/* Stock pulses CAMIF clear before its enable command. */
+		msm_camera_io_w_mb(4, vfe_dev->vfe_base + 0x2f4);
+		msm_vfe44_update_camif_state(vfe_dev, ENABLE_CAMIF);
+	}
+}
+
+static const struct msm_vfe_recovery_ops msm_vfe44_recovery_ops = {
+	/* S stock msm_vfe44_get_overflow_mask, 0xc06fe118. */
+	.overflow_mask = 0x00fffe7e,
+	.get_irq_mask = msm_vfe44_recovery_get_irq_mask,
+	.halt = msm_vfe44_recovery_halt,
+	.reset = msm_vfe44_recovery_reset,
+	.restart = msm_vfe44_recovery_restart,
+};
+#endif
 
 static uint32_t msm_vfe44_get_wm_mask(
 	uint32_t irq_status0, uint32_t irq_status1)
@@ -1388,6 +1486,9 @@ static struct v4l2_subdev_internal_ops msm_vfe44_internal_ops = {
 };
 
 struct msm_vfe_hardware_info vfe44_hw_info = {
+#ifdef CONFIG_MACH_APQ8084_EF67
+	.recovery_ops = &msm_vfe44_recovery_ops,
+#endif
 	.num_iommu_ctx = 1,
 	.num_iommu_secure_ctx = 1,
 	.vfe_clk_idx = VFE44_CLK_IDX,

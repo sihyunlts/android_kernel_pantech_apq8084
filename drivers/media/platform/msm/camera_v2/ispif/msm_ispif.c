@@ -678,6 +678,81 @@ static int msm_ispif_start_frame_boundary(struct ispif_device *ispif,
 	return rc;
 }
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+/* S0226114 command 5 at 0xc070538c resets only the requested VFE paths. */
+static int msm_ispif_restart_frame_boundary(struct ispif_device *ispif,
+	struct msm_ispif_param_data *params)
+{
+	struct clk *reset_clk[ARRAY_SIZE(ispif_8974_reset_clk_info)];
+	struct msm_ispif_params_entry *entry;
+	uint32_t vfe_mask = 0;
+	unsigned int i, cid;
+	int rc, disable_rc;
+
+	if (ispif->ispif_state != ISPIF_POWER_UP || !ispif->base)
+		return -EPERM;
+	if (ispif->csid_version < CSID_VERSION_V30 ||
+	    !ispif->hw_num_isps || ispif->hw_num_isps > VFE_MAX ||
+	    ispif->vfe_info.num_vfe < 1 ||
+	    ispif->vfe_info.num_vfe > ispif->hw_num_isps ||
+	    !params->num || params->num > MAX_PARAM_ENTRIES)
+		return -EINVAL;
+
+	/* Validate the entire request before enabling clocks or touching MMIO. */
+	for (i = 0; i < params->num; i++) {
+		entry = &params->entries[i];
+		if ((unsigned int)entry->vfe_intf >= ispif->vfe_info.num_vfe ||
+		    (unsigned int)entry->intftype >= INTF_MAX ||
+		    entry->num_cids < 1 ||
+		    entry->num_cids > ARRAY_SIZE(entry->cids))
+			return -EINVAL;
+		for (cid = 0; cid < entry->num_cids; cid++)
+			if ((unsigned int)entry->cids[cid] >= CID_MAX)
+				return -EINVAL;
+		vfe_mask |= BIT(entry->vfe_intf);
+	}
+
+	rc = msm_cam_clk_enable(&ispif->pdev->dev,
+		ispif_8974_reset_clk_info, reset_clk,
+		ARRAY_SIZE(ispif_8974_reset_clk_info), 1);
+	if (rc < 0)
+		return rc;
+
+	/* Preserve register settings and clock domains: stock writes 0x1ff9. */
+	for (i = 0; i < VFE_MAX; i++) {
+		if (!(vfe_mask & BIT(i)))
+			continue;
+		init_completion(&ispif->reset_complete[i]);
+		msm_camera_io_w(0x00001ff9, ispif->base +
+			(i == VFE0 ? ISPIF_RST_CMD_ADDR : ISPIF_RST_CMD_1_ADDR));
+	}
+	for (i = 0; i < VFE_MAX; i++) {
+		if (!(vfe_mask & BIT(i)))
+			continue;
+		if (!wait_for_completion_timeout(&ispif->reset_complete[i],
+						msecs_to_jiffies(500))) {
+			rc = -ETIMEDOUT;
+			break;
+		}
+	}
+	disable_rc = msm_cam_clk_enable(&ispif->pdev->dev,
+		ispif_8974_reset_clk_info, reset_clk,
+		ARRAY_SIZE(ispif_8974_reset_clk_info), 0);
+	if (rc < 0)
+		return rc;
+	if (disable_rc < 0)
+		return disable_rc;
+
+	msm_ispif_intf_cmd(ispif, ISPIF_INTF_CMD_ENABLE_FRAME_BOUNDARY, params);
+	for (i = 0; i < params->num; i++) {
+		entry = &params->entries[i];
+		msm_ispif_enable_intf_cids(ispif, entry->intftype,
+			msm_ispif_get_cids_mask_from_cfg(entry), entry->vfe_intf, 1);
+	}
+	return 0;
+}
+#endif
+
 static int msm_ispif_stop_frame_boundary(struct ispif_device *ispif,
 	struct msm_ispif_param_data *params)
 {
@@ -1018,6 +1093,13 @@ static long msm_ispif_cmd(struct v4l2_subdev *sd, void *arg)
 		rc = msm_ispif_start_frame_boundary(ispif, &pcdata->params);
 		msm_ispif_io_dump_reg(ispif);
 		break;
+#ifdef CONFIG_MACH_APQ8084_EF67
+	case ISPIF_RESTART_FRAME_BOUNDARY:
+		rc = msm_ispif_restart_frame_boundary(ispif, &pcdata->params);
+		if (ispif->ispif_state == ISPIF_POWER_UP && ispif->base)
+			msm_ispif_io_dump_reg(ispif);
+		break;
+#endif
 	case ISPIF_STOP_FRAME_BOUNDARY:
 		rc = msm_ispif_stop_frame_boundary(ispif, &pcdata->params);
 		msm_ispif_io_dump_reg(ispif);
@@ -1050,8 +1132,12 @@ static long msm_ispif_subdev_ioctl(struct v4l2_subdev *sd,
 	case MSM_SD_SHUTDOWN: {
 		struct ispif_device *ispif =
 			(struct ispif_device *)v4l2_get_subdevdata(sd);
-		if (ispif && ispif->base)
-			msm_ispif_release(ispif);
+		if (ispif) {
+			mutex_lock(&ispif->mutex);
+			if (ispif->base)
+				msm_ispif_release(ispif);
+			mutex_unlock(&ispif->mutex);
+		}
 		return 0;
 	}
 	default:

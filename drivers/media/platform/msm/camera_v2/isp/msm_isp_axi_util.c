@@ -1182,6 +1182,140 @@ static void msm_isp_get_stream_wm_mask(
 		*wm_reload_mask |= (1 << stream_info->wm[i]);
 }
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+int msm_isp_axi_halt(struct vfe_device *vfe_dev,
+	struct msm_vfe_axi_halt_cmd *cmd)
+{
+	const struct msm_vfe_recovery_ops *ops = vfe_dev->hw_info->recovery_ops;
+	struct msm_vfe_error_info *error = &vfe_dev->error_info;
+	unsigned long flags;
+	int rc;
+
+	if (!ops || !vfe_dev->vfe_base)
+		return -EOPNOTSUPP;
+	if (cmd->stop_camif > 1 || cmd->overflow_detected > 1)
+		return -EINVAL;
+	spin_lock_irqsave(&vfe_dev->shared_data_lock, flags);
+	if (atomic_read(&error->recovery_state) == VFE_RECOVERY_IDLE) {
+		ops->get_irq_mask(vfe_dev, &error->saved_irq_mask0,
+			&error->saved_irq_mask1);
+		atomic_set(&error->recovery_state, VFE_RECOVERY_HALTED);
+	} else if (atomic_read(&error->recovery_state) != VFE_RECOVERY_HALTED) {
+		spin_unlock_irqrestore(&vfe_dev->shared_data_lock, flags);
+		return -EBUSY;
+	}
+	spin_unlock_irqrestore(&vfe_dev->shared_data_lock, flags);
+	/* S stock's 8-byte halt ioctl always waits; IRQ halt is nonblocking. */
+	rc = ops->halt(vfe_dev, 1);
+	if (cmd->stop_camif)
+		vfe_dev->hw_info->vfe_ops.core_ops.update_camif_state(vfe_dev,
+			DISABLE_CAMIF_IMMEDIATELY);
+	return rc;
+}
+
+static int msm_isp_validate_recovery_streams(struct vfe_device *vfe_dev)
+{
+	struct msm_vfe_axi_stream *stream;
+	unsigned int i, plane;
+
+	for (i = 0; i < MAX_NUM_STREAM; i++) {
+		stream = &vfe_dev->axi_data.stream_info[i];
+		if (stream->state != ACTIVE)
+			continue;
+		if ((unsigned int)stream->stream_src >= VFE_AXI_SRC_MAX ||
+		    !stream->num_planes || stream->num_planes > MAX_PLANES_PER_STREAM)
+			return -EINVAL;
+		for (plane = 0; plane < stream->num_planes; plane++)
+			if (stream->wm[plane] >= vfe_dev->hw_info->axi_hw_info->num_wm)
+				return -EINVAL;
+	}
+	return 0;
+}
+
+int msm_isp_axi_reset(struct vfe_device *vfe_dev,
+	struct msm_vfe_axi_reset_cmd *cmd)
+{
+	const struct msm_vfe_recovery_ops *ops = vfe_dev->hw_info->recovery_ops;
+	struct msm_vfe_axi_stream *stream;
+	unsigned long flags;
+	unsigned int i;
+	int rc;
+
+	if (!ops || !vfe_dev->vfe_base)
+		return -EOPNOTSUPP;
+	if (cmd->blocking > 1)
+		return -EINVAL;
+	if (atomic_read(&vfe_dev->error_info.recovery_state) != VFE_RECOVERY_HALTED)
+		return -EPIPE;
+	rc = msm_isp_validate_recovery_streams(vfe_dev);
+	if (rc)
+		return rc;
+	atomic_set(&vfe_dev->error_info.recovery_state, VFE_RECOVERY_RESETTING);
+	rc = ops->reset(vfe_dev, cmd->blocking);
+	if (rc)
+		goto failed;
+	for (i = 0; i < MAX_NUM_STREAM; i++) {
+		stream = &vfe_dev->axi_data.stream_info[i];
+		if (stream->state != ACTIVE)
+			continue;
+		rc = vfe_dev->buf_mgr->ops->reset_buf(vfe_dev->buf_mgr,
+			stream->bufq_handle);
+		if (rc)
+			goto failed;
+		spin_lock_irqsave(&stream->lock, flags);
+		stream->buf[0] = NULL;
+		stream->buf[1] = NULL;
+		vfe_dev->axi_data.src_info[SRC_TO_INTF(stream->stream_src)].frame_id =
+			cmd->frame_id;
+		if (stream->stream_type == BURST_STREAM && stream->num_burst_capture)
+			msm_isp_reset_framedrop(vfe_dev, stream);
+		spin_unlock_irqrestore(&stream->lock, flags);
+	}
+	return 0;
+failed:
+	atomic_set(&vfe_dev->error_info.recovery_state, VFE_RECOVERY_HALTED);
+	return rc;
+}
+
+int msm_isp_axi_restart(struct vfe_device *vfe_dev,
+	struct msm_vfe_axi_restart_cmd *cmd)
+{
+	const struct msm_vfe_recovery_ops *ops = vfe_dev->hw_info->recovery_ops;
+	struct msm_vfe_axi_stream *stream;
+	unsigned long flags;
+	unsigned int i;
+	int rc;
+
+	if (!ops || !vfe_dev->vfe_base)
+		return -EOPNOTSUPP;
+	if (cmd->enable_camif > 1)
+		return -EINVAL;
+	if (atomic_read(&vfe_dev->error_info.recovery_state) != VFE_RECOVERY_READY)
+		return -EPIPE;
+	rc = msm_isp_validate_recovery_streams(vfe_dev);
+	if (rc)
+		return rc;
+	for (i = 0; i < MAX_NUM_STREAM; i++) {
+		stream = &vfe_dev->axi_data.stream_info[i];
+		if (stream->state != ACTIVE)
+			continue;
+		spin_lock_irqsave(&stream->lock, flags);
+		rc = msm_isp_init_stream_ping_pong_reg(vfe_dev, stream);
+		spin_unlock_irqrestore(&stream->lock, flags);
+		if (rc)
+			goto failed;
+	}
+	ops->restart(vfe_dev, cmd->enable_camif);
+	return 0;
+failed:
+	/* Keep DMA halted; the next reset returns partially acquired buffers.
+	 * A shared queue may already hold buffers for the other restarted VFE.
+	 */
+	atomic_set(&vfe_dev->error_info.recovery_state, VFE_RECOVERY_HALTED);
+	return rc;
+}
+#endif
+
 static int msm_isp_start_axi_stream(struct vfe_device *vfe_dev,
 			struct msm_vfe_axi_stream_cfg_cmd *stream_cfg_cmd,
 			enum msm_isp_camif_update_state camif_update)

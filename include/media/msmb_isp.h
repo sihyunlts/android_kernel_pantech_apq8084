@@ -340,6 +340,22 @@ struct msm_vfe_axi_src_state {
 	uint32_t src_active;
 };
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+struct msm_vfe_axi_halt_cmd {
+	uint32_t stop_camif;
+	uint32_t overflow_detected;
+};
+
+struct msm_vfe_axi_reset_cmd {
+	uint32_t blocking;
+	uint32_t frame_id;
+};
+
+struct msm_vfe_axi_restart_cmd {
+	uint32_t enable_camif;
+};
+#endif
+
 enum msm_isp_event_idx {
 	ISP_REG_UPDATE      = 0,
 	ISP_START_ACK       = 1,
@@ -470,5 +486,14 @@ struct msm_isp_event_data {
 
 #define VIDIOC_MSM_ISP_SMMU_ATTACH \
 	_IOWR('V', BASE_VIDIOC_PRIVATE+15, struct msm_vfe_smmu_attach_cmd)
+
+#ifdef CONFIG_MACH_APQ8084_EF67
+#define VIDIOC_MSM_ISP_AXI_HALT \
+	_IOWR('V', BASE_VIDIOC_PRIVATE+17, struct msm_vfe_axi_halt_cmd)
+#define VIDIOC_MSM_ISP_AXI_RESET \
+	_IOWR('V', BASE_VIDIOC_PRIVATE+18, struct msm_vfe_axi_reset_cmd)
+#define VIDIOC_MSM_ISP_AXI_RESTART \
+	_IOWR('V', BASE_VIDIOC_PRIVATE+19, struct msm_vfe_axi_restart_cmd)
+#endif
 
 #endif /* __MSMB_ISP__ */

@@ -223,6 +223,15 @@ static int msm_isp_buf_prepare(struct msm_isp_buf_mgr *buf_mgr,
 	}
 
 	spin_lock_irqsave(&bufq->bufq_lock, flags);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	/* Shutdown may return an already queued native buffer a second time. */
+	if (!vb2_buf && info->dirty_buf &&
+		BUF_SRC(bufq->stream_id) == MSM_ISP_BUFFER_SRC_NATIVE &&
+		buf_info->state == MSM_ISP_BUFFER_STATE_QUEUED) {
+		spin_unlock_irqrestore(&bufq->bufq_lock, flags);
+		return MSM_ISP_BUFFER_STATE_QUEUED;
+	}
+#endif
 	if (buf_info->state == MSM_ISP_BUFFER_STATE_DIVERTED) {
 		rc = buf_info->state;
 		spin_unlock_irqrestore(&bufq->bufq_lock, flags);
@@ -530,6 +539,51 @@ static int msm_isp_buf_done(struct msm_isp_buf_mgr *buf_mgr,
 	return 0;
 }
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+/* Requeue only buffers owned by the halted VFE, not userspace/CPP buffers. */
+static int msm_isp_reset_buf(struct msm_isp_buf_mgr *buf_mgr, uint32_t handle)
+{
+	struct msm_isp_bufq *bufq;
+	struct msm_isp_buffer *buf, *next;
+	unsigned long flags;
+	unsigned int i;
+	int rc = 0;
+
+	if ((handle & 0xff) >= buf_mgr->num_buf_q)
+		return -EINVAL;
+	bufq = msm_isp_get_bufq(buf_mgr, handle);
+	if (!bufq)
+		return -EINVAL;
+	spin_lock_irqsave(&bufq->bufq_lock, flags);
+	list_for_each_entry_safe(buf, next, &bufq->share_head, share_list) {
+		list_del_init(&buf->share_list);
+		if (buf->buf_reuse_flag)
+			kfree(buf);
+	}
+	for (i = 0; i < bufq->num_bufs; i++) {
+		buf = &bufq->bufs[i];
+		if (buf->state != MSM_ISP_BUFFER_STATE_DEQUEUED)
+			continue;
+		if (BUF_SRC(bufq->stream_id) == MSM_ISP_BUFFER_SRC_NATIVE) {
+			if (list_empty(&buf->list))
+				list_add_tail(&buf->list, &bufq->head);
+		} else if (BUF_SRC(bufq->stream_id) == MSM_ISP_BUFFER_SRC_HAL) {
+			rc = buf_mgr->vb2_ops->put_buf(buf->vb2_buf,
+				bufq->session_id, bufq->stream_id);
+			if (rc)
+				break;
+		}
+		buf->state = MSM_ISP_BUFFER_STATE_QUEUED;
+		memset(buf->buf_used, 0, sizeof(buf->buf_used));
+		buf->buf_get_count = 0;
+		buf->buf_put_count = 0;
+		buf->buf_reuse_flag = 0;
+	}
+	spin_unlock_irqrestore(&bufq->bufq_lock, flags);
+	return rc;
+}
+#endif
+
 static int msm_isp_flush_buf(struct msm_isp_buf_mgr *buf_mgr,
 		uint32_t bufq_handle, enum msm_isp_buffer_flush_t flush_type)
 {
@@ -618,6 +672,12 @@ static int msm_isp_buf_enqueue(struct msm_isp_buf_mgr *buf_mgr,
 		pr_err("%s: Buf prepare failed\n", __func__);
 		return -EINVAL;
 	}
+
+#ifdef CONFIG_MACH_APQ8084_EF67
+	/* Acknowledge the duplicate without touching a buffer VFE may dequeue. */
+	if (buf_state == MSM_ISP_BUFFER_STATE_QUEUED)
+		return 0;
+#endif
 
 	if (buf_state == MSM_ISP_BUFFER_STATE_DIVERTED) {
 		buf_info = msm_isp_get_buf_ptr(buf_mgr,
@@ -1009,6 +1069,9 @@ static struct msm_isp_buf_ops isp_buf_ops = {
 	.get_buf = msm_isp_get_buf,
 	.put_buf = msm_isp_put_buf,
 	.flush_buf = msm_isp_flush_buf,
+#ifdef CONFIG_MACH_APQ8084_EF67
+	.reset_buf = msm_isp_reset_buf,
+#endif
 	.buf_done = msm_isp_buf_done,
 	.buf_divert = msm_isp_buf_divert,
 	.register_ctx = msm_isp_register_ctx,

@@ -127,6 +127,9 @@ struct msm_isp_buf_ops {
 
 	int (*flush_buf) (struct msm_isp_buf_mgr *buf_mgr,
 		uint32_t bufq_handle, enum msm_isp_buffer_flush_t flush_type);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	int (*reset_buf)(struct msm_isp_buf_mgr *buf_mgr, uint32_t bufq_handle);
+#endif
 
 	int (*buf_done) (struct msm_isp_buf_mgr *buf_mgr,
 		uint32_t bufq_handle, uint32_t buf_index,
