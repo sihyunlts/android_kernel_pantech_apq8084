@@ -16,11 +16,14 @@
 #include <linux/i2c.h>
 #include <linux/input/mt.h>
 #include <linux/interrupt.h>
+#include <linux/kref.h>
+#include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of_gpio.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
+#include <linux/uaccess.h>
 #include <asm/unaligned.h>
 
 #include "atmel-mxt-ef67-config.h"
@@ -43,6 +46,8 @@
 #define EF67_MXT_T100_STYLUS	0x20
 #define EF67_MXT_T100_HOVER	0x40
 #define EF67_MXT_T100_GLOVE	0x50
+#define EF67_MXT_SET_MODE		6001
+#define EF67_MXT_GET_MODE		6004
 
 struct ef67_mxt_object {
 	u8 type;
@@ -56,12 +61,16 @@ enum ef67_mxt_mode {
 	EF67_MXT_FINGER,
 	EF67_MXT_GLOVE,
 	EF67_MXT_STYLUS,
+	EF67_MXT_STYLUS_DRAW,
 };
+
+struct ef67_mxt_control;
 
 struct ef67_mxt {
 	struct i2c_client *client;
 	struct input_dev *input;
 	struct mutex lock;
+	struct ef67_mxt_control *control;
 	struct regulator *avdd;
 	struct ef67_mxt_object *objects;
 	u8 object_count;
@@ -94,10 +103,18 @@ struct ef67_mxt {
 #endif
 };
 
+/* Open control files may outlive the I2C device. */
+struct ef67_mxt_control {
+	struct miscdevice misc;
+	struct kref ref;
+	struct mutex lock;
+	struct ef67_mxt *touch;
+};
+
 /* S stock report_input uses vendor code 253 for the left capacitive key. */
 static const unsigned int ef67_mxt_keys[] = { 253, KEY_HOMEPAGE, KEY_BACK };
 static const char * const ef67_mxt_mode_names[] = {
-	"finger", "glove", "stylus",
+	"finger", "glove", "stylus", "stylus_draw",
 };
 
 static int ef67_mxt_read(struct ef67_mxt *touch, u16 address,
@@ -264,6 +281,8 @@ static const u8 *ef67_mxt_config(enum ef67_mxt_mode mode)
 	case EF67_MXT_GLOVE:
 		return ef67_mxt_glove_config;
 	case EF67_MXT_STYLUS:
+	case EF67_MXT_STYLUS_DRAW:
+		/* S stock modes 2 and 3 select the same pen configuration. */
 		return ef67_mxt_stylus_config;
 	default:
 		return ef67_mxt_finger_config;
@@ -565,18 +584,11 @@ static ssize_t touch_mode_show(struct device *dev,
 	return ret;
 }
 
-static ssize_t touch_mode_store(struct device *dev,
-			       struct device_attribute *attribute,
-			       const char *buffer, size_t count)
+static int ef67_mxt_set_mode(struct ef67_mxt *touch, unsigned int mode)
 {
-	struct ef67_mxt *touch = i2c_get_clientdata(to_i2c_client(dev));
-	unsigned int mode;
 	int ret = 0;
 
-	for (mode = 0; mode < ARRAY_SIZE(ef67_mxt_mode_names); mode++)
-		if (sysfs_streq(buffer, ef67_mxt_mode_names[mode]))
-			break;
-	if (mode == ARRAY_SIZE(ef67_mxt_mode_names))
+	if (mode >= ARRAY_SIZE(ef67_mxt_mode_names))
 		return -EINVAL;
 	mutex_lock(&touch->lock);
 	if (touch->stopping) {
@@ -584,7 +596,11 @@ static ssize_t touch_mode_store(struct device *dev,
 		goto out;
 	}
 	if (touch->system_suspended || touch->display_blank) {
-		ret = -EBUSY;
+		/* Resume resets the controller and restores the selected RAM image. */
+		if (touch->mode != mode) {
+			touch->mode = mode;
+			touch->configured = false;
+		}
 		goto out;
 	}
 	if (touch->configured && !ACCESS_ONCE(touch->controller_fault) &&
@@ -600,7 +616,129 @@ static ssize_t touch_mode_store(struct device *dev,
 		ret = ef67_mxt_update_scanning(touch);
 out:
 	mutex_unlock(&touch->lock);
+	return ret;
+}
+
+static ssize_t touch_mode_store(struct device *dev,
+			       struct device_attribute *attribute,
+			       const char *buffer, size_t count)
+{
+	struct ef67_mxt *touch = i2c_get_clientdata(to_i2c_client(dev));
+	unsigned int mode;
+	int ret;
+
+	for (mode = 0; mode < ARRAY_SIZE(ef67_mxt_mode_names); mode++)
+		if (sysfs_streq(buffer, ef67_mxt_mode_names[mode]))
+			break;
+	ret = ef67_mxt_set_mode(touch, mode);
 	return ret ? ret : count;
+}
+
+static void ef67_mxt_control_release(struct kref *ref)
+{
+	struct ef67_mxt_control *control =
+		container_of(ref, struct ef67_mxt_control, ref);
+
+	kfree(control);
+}
+
+static int ef67_mxt_control_open(struct inode *inode, struct file *file)
+{
+	struct miscdevice *misc = file->private_data;
+	struct ef67_mxt_control *control =
+		container_of(misc, struct ef67_mxt_control, misc);
+
+	kref_get(&control->ref);
+	file->private_data = control;
+	return nonseekable_open(inode, file);
+}
+
+static int ef67_mxt_control_close(struct inode *inode, struct file *file)
+{
+	struct ef67_mxt_control *control = file->private_data;
+
+	kref_put(&control->ref, ef67_mxt_control_release);
+	return 0;
+}
+
+static long ef67_mxt_control_ioctl(struct file *file, unsigned int command,
+				 unsigned long argument)
+{
+	struct ef67_mxt_control *control = file->private_data;
+	struct ef67_mxt *touch;
+	int mode, ret;
+
+	mutex_lock(&control->lock);
+	touch = control->touch;
+	if (!touch) {
+		ret = -ENODEV;
+		goto out;
+	}
+	switch (command) {
+	case EF67_MXT_SET_MODE:
+		/* Stock takes a scalar mode, not a user pointer. */
+		ret = argument >= ARRAY_SIZE(ef67_mxt_mode_names) ? -EINVAL :
+			ef67_mxt_set_mode(touch, argument);
+		break;
+	case EF67_MXT_GET_MODE:
+		mutex_lock(&touch->lock);
+		mode = touch->mode;
+		ret = touch->stopping ? -ENODEV : 0;
+		mutex_unlock(&touch->lock);
+		if (!ret && copy_to_user((void __user *)argument, &mode, sizeof(mode)))
+			ret = -EFAULT;
+		break;
+	default:
+		ret = -ENOTTY;
+	}
+out:
+	mutex_unlock(&control->lock);
+	return ret;
+}
+
+static const struct file_operations ef67_mxt_control_fops = {
+	.owner = THIS_MODULE,
+	.open = ef67_mxt_control_open,
+	.release = ef67_mxt_control_close,
+	.unlocked_ioctl = ef67_mxt_control_ioctl,
+	.llseek = no_llseek,
+};
+
+static int ef67_mxt_register_control(struct ef67_mxt *touch)
+{
+	struct ef67_mxt_control *control;
+	int ret;
+
+	control = kzalloc(sizeof(*control), GFP_KERNEL);
+	if (!control)
+		return -ENOMEM;
+	kref_init(&control->ref);
+	mutex_init(&control->lock);
+	control->touch = touch;
+	control->misc.minor = MISC_DYNAMIC_MINOR;
+	control->misc.name = "touch_fops";
+	control->misc.fops = &ef67_mxt_control_fops;
+	control->misc.parent = &touch->client->dev;
+	control->misc.mode = 0600;
+	ret = misc_register(&control->misc);
+	if (ret) {
+		kref_put(&control->ref, ef67_mxt_control_release);
+		return ret;
+	}
+	touch->control = control;
+	return 0;
+}
+
+static void ef67_mxt_unregister_control(struct ef67_mxt *touch)
+{
+	struct ef67_mxt_control *control = touch->control;
+
+	misc_deregister(&control->misc);
+	mutex_lock(&control->lock);
+	control->touch = NULL;
+	mutex_unlock(&control->lock);
+	kref_put(&control->ref, ef67_mxt_control_release);
+	touch->control = NULL;
 }
 
 static DEVICE_ATTR(touch_mode, S_IRUGO | S_IWUSR,
@@ -756,6 +894,11 @@ static int ef67_mxt_probe(struct i2c_client *client,
 	ret = sysfs_create_group(&client->dev.kobj, &ef67_mxt_attribute_group);
 	if (ret)
 		goto unregister_fb;
+	ret = ef67_mxt_register_control(touch);
+	if (ret) {
+		sysfs_remove_group(&client->dev.kobj, &ef67_mxt_attribute_group);
+		goto unregister_fb;
+	}
 	dev_info(&client->dev, "EF67 mXT641T finger/glove/stylus input ready\n");
 	return 0;
 
@@ -777,6 +920,7 @@ static int ef67_mxt_remove(struct i2c_client *client)
 {
 	struct ef67_mxt *touch = i2c_get_clientdata(client);
 
+	ef67_mxt_unregister_control(touch);
 	sysfs_remove_group(&client->dev.kobj, &ef67_mxt_attribute_group);
 #ifdef CONFIG_FB
 	fb_unregister_client(&touch->fb_notifier);

@@ -2,21 +2,40 @@ What:		/sys/bus/i2c/devices/<bus>-004a/touch_mode
 Date:		October 2026
 Description:
 		Selects the stock volatile touch-controller configuration.
-		Accepted values are "finger", "glove" and "stylus". The
-		default on driver probe is "finger". Reads return the last
+		Accepted values are "finger", "glove", "stylus" and
+		"stylus_draw". Both pen modes use the same stock configuration.
+		The default on driver probe is "finger". Reads return the last
 		fully applied mode, followed by a newline. Only root can write.
 
 		A mode change releases all active contacts and capacitive keys,
 		writes the complete configuration and calibrates the controller.
-		It never updates firmware or nonvolatile settings. Writes while
-		the display is blank or the system is suspended return EBUSY.
+		It never updates firmware or nonvolatile settings. While the
+		display is blank or the system is suspended, a changed mode is
+		remembered without I2C access and applied on resume. Reads return
+		EIO until that new configuration has been applied.
 		Unknown values return EINVAL.
 
 		An incomplete configuration write, IRQ message read failure or
-		controller reset/config fault stops touch reporting. Reads then return EIO; writing a
-		valid mode while awake reapplies the entire configuration.
+		controller reset/config fault stops touch reporting. Reads then
+		return EIO; writing a valid mode while awake reapplies the entire
+		configuration.
 		A failed sleep/wake transition also stops reporting, but retains
 		a completed configuration; writing its mode retries scanning.
 		After a completed sleep, wake performs the stock soft reset and
 		100ms wait, then restores the selected volatile configuration.
 		Successful writes return the supplied byte count.
+
+What:		/dev/touch_fops
+Date:		October 2026
+Description:
+		Provides the S0226114 touch-mode ioctl interface, including
+		read-only opens used by libsky_ctrl_drv.so. Command 6001 takes
+		a scalar mode: 0 finger, 1 glove, 2 stylus, 3 stylus_draw.
+		Command 6004 copies the selected mode to a userspace int pointer.
+		Selection uses the same control path as the sysfs attribute.
+
+		Invalid modes return EINVAL, bad pointers EFAULT and unsupported
+		commands ENOTTY. Transport failures are propagated. Device removal
+		makes existing files return ENODEV. Cover-mode and debugging
+		commands are not implemented. The device is created with mode
+		0600; stock init applies its system:radio 0660 permissions.
