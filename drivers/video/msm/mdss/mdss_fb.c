@@ -54,6 +54,11 @@
 
 #include "mdss_fb.h"
 #include "mdss_mdp_splash_logo.h"
+#ifdef CONFIG_MACH_APQ8084_EF67
+#include "mdss_dsi.h"
+#include "mdss_dsi_panel_ef67.h"
+#include "mdss_mdp_pp.h"
+#endif
 
 #ifdef CONFIG_FB_MSM_TRIPLE_BUFFER
 #define MDSS_FB_NUM 3
@@ -455,6 +460,79 @@ static ssize_t mdss_fb_get_src_split_info(struct device *dev,
 	return ret;
 }
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+static struct mdss_panel_data *ef67_fb_panel(struct device *dev)
+{
+	struct fb_info *fbi = dev_get_drvdata(dev);
+	struct msm_fb_data_type *mfd = fbi->par;
+
+	return dev_get_platdata(&mfd->pdev->dev);
+}
+
+static ssize_t ef67_fb_cabc_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	int enabled = mdss_dsi_ef67_get_cabc(ef67_fb_panel(dev));
+
+	return enabled < 0 ? enabled :
+		scnprintf(buf, PAGE_SIZE, "%s", enabled ? "on" : "off");
+}
+
+static ssize_t ef67_fb_cabc_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	bool enabled;
+	int ret;
+
+	if (sysfs_streq(buf, "on"))
+		enabled = true;
+	else if (sysfs_streq(buf, "off"))
+		enabled = false;
+	else
+		return -EINVAL;
+	ret = mdss_dsi_ef67_set_cabc(ef67_fb_panel(dev), enabled);
+	return ret ? ret : count;
+}
+
+static ssize_t ef67_fb_sharpness_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%u\n", mdss_mdp_ef67_get_sharpness());
+}
+
+static ssize_t ef67_fb_sharpness_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	u32 strength;
+	int ret = kstrtou32(buf, 10, &strength);
+
+	if (ret)
+		return ret;
+	if (strength > 255)
+		return -EINVAL;
+	mdss_mdp_ef67_set_sharpness(strength);
+	return count;
+}
+
+static DEVICE_ATTR(cabc_ctl, S_IRUGO | S_IWUSR,
+		   ef67_fb_cabc_show, ef67_fb_cabc_store);
+static DEVICE_ATTR(sharpness_ctl, S_IRUGO | S_IWUSR,
+		   ef67_fb_sharpness_show, ef67_fb_sharpness_store);
+
+static umode_t ef67_fb_attribute_visible(struct kobject *kobj,
+		struct attribute *attr, int index)
+{
+	struct device *dev = container_of(kobj, struct device, kobj);
+	struct fb_info *fbi = dev_get_drvdata(dev);
+	struct msm_fb_data_type *mfd = fbi->par;
+
+	if ((attr == &dev_attr_cabc_ctl.attr || attr == &dev_attr_sharpness_ctl.attr) &&
+	    (mfd->index || mdss_dsi_ef67_get_cabc(ef67_fb_panel(dev)) < 0))
+		return 0;
+	return attr->mode;
+}
+#endif
+
 static DEVICE_ATTR(msm_fb_type, S_IRUGO, mdss_fb_get_type, NULL);
 static DEVICE_ATTR(msm_fb_split, S_IRUGO | S_IWUSR, mdss_fb_show_split,
 					mdss_fb_store_split);
@@ -467,6 +545,10 @@ static DEVICE_ATTR(msm_fb_src_split_info, S_IRUGO, mdss_fb_get_src_split_info,
 	NULL);
 
 static struct attribute *mdss_fb_attrs[] = {
+#ifdef CONFIG_MACH_APQ8084_EF67
+	&dev_attr_cabc_ctl.attr,
+	&dev_attr_sharpness_ctl.attr,
+#endif
 	&dev_attr_msm_fb_type.attr,
 	&dev_attr_msm_fb_split.attr,
 	&dev_attr_show_blank_event.attr,
@@ -479,6 +561,9 @@ static struct attribute *mdss_fb_attrs[] = {
 
 static struct attribute_group mdss_fb_attr_group = {
 	.attrs = mdss_fb_attrs,
+#ifdef CONFIG_MACH_APQ8084_EF67
+	.is_visible = ef67_fb_attribute_visible,
+#endif
 };
 
 static int mdss_fb_create_sysfs(struct msm_fb_data_type *mfd)

@@ -11,3 +11,25 @@ Description:
 		Input name smart_cover, GPIO9 active-low, both edges, two equal
 		samples separated by 10ms, and SW_LID closed=1/open=0 are preserved.
 		The jiffies/work scheduler does not guarantee exact sample timing.
+
+What:		/sys/class/graphics/fb0/cabc_ctl
+Date:		October 2026
+Description:
+		Read/write on or off to control content-adaptive backlight.
+		The EF67S R63419 panel uses stock HS DCS long-write 55 03 for
+		on and 55 00 for off. The selection changes the initialization
+		command too, preserving it over panel power cycles. When powered
+		off, writes update the selection without sending a command.
+		Read returns on/off without a newline. Invalid input returns
+		EINVAL; transport failures are returned without committing the
+		selection. Stock init assigns system:system 0664 permissions.
+
+What:		/sys/class/graphics/fb0/sharpness_ctl
+Date:		October 2026
+Description:
+		Read/write the default video sharpening strength, decimal 0..255.
+		Zero selects the stock default 32. Read returns strength and newline.
+		The next VIG scaler setup uses it when the overlay supplies no
+		explicit sharpening configuration. Existing thresholds and YUV/
+		scaling eligibility rules are unchanged. Invalid values are rejected.
+		Stock init assigns system:system 0664 permissions.

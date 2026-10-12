@@ -28,6 +28,10 @@ struct mdss_dsi_ef67_panel {
 	int gpio[EF67_GPIO_COUNT];
 	bool powered;
 	bool dimming_enabled;
+	bool cabc_enabled;
+	char *init_cabc;
+	char cabc_payload[2];
+	struct dsi_cmd_desc cabc_command;
 };
 
 static const char * const ef67_gpio_properties[] = {
@@ -42,7 +46,9 @@ int mdss_dsi_ef67_init(struct device *dev, struct device_node *node,
 		struct mdss_dsi_ctrl_pdata *ctrl)
 {
 	struct mdss_dsi_ef67_panel *panel;
-	int i, rc;
+	const u8 *cabc;
+	const char *cabc_state;
+	int i, rc, length;
 
 	/* Other panels in an EF67 build still use the generic CAF path. */
 	if (!of_find_property(node, "qcom,mdss-vcip-en-gpio", NULL))
@@ -54,6 +60,29 @@ int mdss_dsi_ef67_init(struct device *dev, struct device_node *node,
 	if (!panel)
 		return -ENOMEM;
 	mutex_init(&panel->lock);
+	cabc = of_get_property(node, "qcom,mdss-dsi-cabc-command", &length);
+	if (!cabc || length != 9 || cabc[0] != DTYPE_DCS_LWRITE ||
+	    cabc[5] != 0 || cabc[6] != 2 || cabc[7] != 0x55 || cabc[8] != 3)
+		return -EINVAL;
+	if (of_property_read_string(node, "qcom,mdss-dsi-cabc-command-state",
+				    &cabc_state) || strcmp(cabc_state, "dsi_hs_mode"))
+		return -EINVAL;
+	panel->cabc_enabled = true;
+	panel->cabc_payload[0] = 0x55;
+	panel->cabc_payload[1] = 3;
+	panel->cabc_command.dchdr = (struct dsi_ctrl_hdr) {
+		cabc[0], cabc[1], cabc[2], cabc[3], cabc[4], 2
+	};
+	panel->cabc_command.payload = panel->cabc_payload;
+	for (i = 0; i < ctrl->on_cmds.cmd_cnt; i++) {
+		struct dsi_cmd_desc *cmd = &ctrl->on_cmds.cmds[i];
+
+		if (cmd->dchdr.dtype == DTYPE_DCS_LWRITE &&
+		    cmd->dchdr.dlen == 2 && (u8)cmd->payload[0] == 0x55)
+			panel->init_cabc = &cmd->payload[1];
+	}
+	if (!panel->init_cabc)
+		return -EINVAL;
 
 	ctrl->disp_en_gpio = -EINVAL;
 	ctrl->rst_gpio = -EINVAL;
@@ -228,8 +257,75 @@ out:
 	mutex_unlock(&panel->lock);
 }
 
-void mdss_dsi_ef67_panel_on(struct mdss_dsi_ctrl_pdata *ctrl)
+int mdss_dsi_ef67_panel_on(struct mdss_dsi_ctrl_pdata *ctrl)
 {
-	/* Stock initialization sets 0x53=0x0c and CABC 0x55=0x03. */
-	ctrl->ef67_panel->dimming_enabled = true;
+	struct mdss_dsi_ef67_panel *panel = ctrl->ef67_panel;
+	struct dcs_cmd_req req = {
+		.cmds = ctrl->on_cmds.cmds,
+		.cmds_cnt = ctrl->on_cmds.cmd_cnt,
+		.flags = CMD_REQ_COMMIT,
+	};
+	int ret;
+
+	if (ctrl->on_cmds.link_state == DSI_LP_MODE)
+		req.flags |= CMD_REQ_LP_MODE;
+	mutex_lock(&panel->lock);
+	*panel->init_cabc = panel->cabc_enabled ? 3 : 0;
+	ret = mdss_dsi_cmdlist_put(ctrl, &req);
+	if (!ret)
+		panel->dimming_enabled = true;
+	mutex_unlock(&panel->lock);
+	return ret;
+}
+
+static struct mdss_dsi_ctrl_pdata *ef67_panel_controller(
+		struct mdss_panel_data *pdata)
+{
+	struct mdss_dsi_ctrl_pdata *ctrl;
+
+	if (!pdata || (pdata->panel_info.type != MIPI_CMD_PANEL &&
+		       pdata->panel_info.type != MIPI_VIDEO_PANEL) ||
+	    pdata->panel_info.pdest != DISPLAY_1)
+		return NULL;
+	ctrl = container_of(pdata, struct mdss_dsi_ctrl_pdata, panel_data);
+	return ctrl->ef67_panel ? ctrl : NULL;
+}
+
+int mdss_dsi_ef67_get_cabc(struct mdss_panel_data *pdata)
+{
+	struct mdss_dsi_ctrl_pdata *ctrl = ef67_panel_controller(pdata);
+	int enabled;
+
+	if (!ctrl)
+		return -EOPNOTSUPP;
+	mutex_lock(&ctrl->ef67_panel->lock);
+	enabled = ctrl->ef67_panel->cabc_enabled;
+	mutex_unlock(&ctrl->ef67_panel->lock);
+	return enabled;
+}
+
+int mdss_dsi_ef67_set_cabc(struct mdss_panel_data *pdata, bool enabled)
+{
+	struct mdss_dsi_ctrl_pdata *ctrl = ef67_panel_controller(pdata);
+	struct mdss_dsi_ef67_panel *panel;
+	struct dcs_cmd_req req = {
+		.cmds_cnt = 1,
+		.flags = CMD_REQ_COMMIT | CMD_CLK_CTRL,
+	};
+	int ret = 0;
+
+	if (!ctrl)
+		return -EOPNOTSUPP;
+	panel = ctrl->ef67_panel;
+	mutex_lock(&panel->lock);
+	panel->cabc_payload[1] = enabled ? 3 : 0;
+	req.cmds = &panel->cabc_command;
+	if (panel->powered)
+		ret = mdss_dsi_cmdlist_put(ctrl, &req);
+	if (!ret) {
+		panel->cabc_enabled = enabled;
+		*panel->init_cabc = enabled ? 3 : 0;
+	}
+	mutex_unlock(&panel->lock);
+	return ret;
 }

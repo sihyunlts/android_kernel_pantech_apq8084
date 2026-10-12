@@ -286,6 +286,21 @@ static int mdss_mdp_hscl_filter[] = {
 #define SHARP_SMOOTH_THR_DEFAULT	8
 #define SHARP_NOISE_THR_DEFAULT	2
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+static u32 ef67_sharpness = SHARP_STRENGTH_DEFAULT;
+
+u32 mdss_mdp_ef67_get_sharpness(void)
+{
+	return ACCESS_ONCE(ef67_sharpness);
+}
+
+void mdss_mdp_ef67_set_sharpness(u32 strength)
+{
+	/* Stock treats zero as the default, not as sharpening disabled. */
+	ACCESS_ONCE(ef67_sharpness) = strength ? strength : SHARP_STRENGTH_DEFAULT;
+}
+#endif
+
 #define MDP_PP_BUS_VECTOR_ENTRY(ab_val, ib_val)		\
 	{						\
 		.src = MSM_BUS_MASTER_SPDM,		\
@@ -1068,6 +1083,9 @@ static int mdss_mdp_scale_setup(struct mdss_mdp_pipe *pipe)
 		pipe->pp_cfg.sharp_cfg.flags = MDP_PP_OPS_ENABLE |
 			MDP_PP_OPS_WRITE;
 		pipe->pp_cfg.sharp_cfg.strength = SHARP_STRENGTH_DEFAULT;
+#ifdef CONFIG_MACH_APQ8084_EF67
+		pipe->pp_cfg.sharp_cfg.strength = mdss_mdp_ef67_get_sharpness();
+#endif
 		pipe->pp_cfg.sharp_cfg.edge_thr = SHARP_EDGE_THR_DEFAULT;
 		pipe->pp_cfg.sharp_cfg.smooth_thr = SHARP_SMOOTH_THR_DEFAULT;
 		pipe->pp_cfg.sharp_cfg.noise_thr = SHARP_NOISE_THR_DEFAULT;

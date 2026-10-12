@@ -495,10 +495,8 @@ static void mdss_dsi_panel_bl_ctrl(struct mdss_panel_data *pdata,
 
 static int mdss_dsi_panel_on(struct mdss_panel_data *pdata)
 {
-	struct mipi_panel_info *mipi;
 	struct mdss_dsi_ctrl_pdata *ctrl = NULL;
 	struct mdss_panel_info *pinfo;
-	int rc;
 
 	if (pdata == NULL) {
 		pr_err("%s: Invalid input data\n", __func__);
@@ -509,7 +507,6 @@ static int mdss_dsi_panel_on(struct mdss_panel_data *pdata)
 
 	ctrl = container_of(pdata, struct mdss_dsi_ctrl_pdata,
 				panel_data);
-	mipi  = &pdata->panel_info.mipi;
 	if (ctrl->ef67_panel && pinfo->pdest != DISPLAY_1)
 		return 0;
 
@@ -519,15 +516,13 @@ static int mdss_dsi_panel_on(struct mdss_panel_data *pdata)
 	}
 
 	pr_debug("%s: ctrl=%p ndx=%d\n", __func__, ctrl, ctrl->ndx);
+	if (ctrl->ef67_panel)
+		return mdss_dsi_ef67_panel_on(ctrl);
 
 
 	if (ctrl->on_cmds.cmd_cnt) {
-		rc = mdss_dsi_panel_cmds_send(ctrl, &ctrl->on_cmds);
-		if (ctrl->ef67_panel && rc)
-			return rc;
+		mdss_dsi_panel_cmds_send(ctrl, &ctrl->on_cmds);
 	}
-	if (ctrl->ef67_panel)
-		mdss_dsi_ef67_panel_on(ctrl);
 
 	pr_debug("%s:-\n", __func__);
 	return 0;

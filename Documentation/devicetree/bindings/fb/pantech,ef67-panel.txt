@@ -24,7 +24,13 @@ qcom,mdss-dsi-bl-max-level must be 255.
 The stock on/off command sets are required. In particular, the off commands
 use "dsi_hs_mode": MDSS sends BLANK before PANEL_OFF
 removes shared power. The on commands restore dimming (0x53=0x0c) and
-CABC (0x55=0x03). There is no separate runtime CABC interface.
+CABC (0x55=0x03 by default). The runtime cabc_ctl interface changes both
+the immediate command and the value used in initialization.
+
+qcom,mdss-dsi-cabc-command is the stock HS command packet
+[39 01 00 00 00 00 02 55 03]; qcom,mdss-dsi-cabc-command-state must be
+"dsi_hs_mode". The on-command set must contain a DCS long write 0x55
+with a two-byte payload so the selected CABC mode survives power cycles.
 
 qcom,cont-splash-enabled retains bootloader output levels when continuous
 splash is enabled by the MDSS boot configuration. The EF67 power sequence

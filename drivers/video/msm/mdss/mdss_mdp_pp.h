@@ -43,6 +43,10 @@ void pp_print_ad_init_cfg(struct mdss_ad_init_cfg *data, int tab_depth);
 void pp_print_ad_input(struct mdss_ad_input *data, int tab_depth);
 void pp_print_histogram_cfg(struct mdp_histogram_cfg *data, int tab_depth);
 void pp_print_sharp_cfg(struct mdp_sharp_cfg *data, int tab_depth);
+#ifdef CONFIG_MACH_APQ8084_EF67
+u32 mdss_mdp_ef67_get_sharpness(void);
+void mdss_mdp_ef67_set_sharpness(u32 strength);
+#endif
 void pp_print_calib_config_data(struct mdp_calib_config_data *data,
 				int tab_depth);
 void pp_print_calib_config_buffer(struct mdp_calib_config_buffer *data,
