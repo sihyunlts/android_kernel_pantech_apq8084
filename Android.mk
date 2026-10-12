@@ -1,7 +1,7 @@
 LOCAL_PATH := $(call my-dir)
 
 # Current integration is validated for EF67S only.
-ifeq ($(TARGET_DEVICE),ef67s)
+ifeq ($(TARGET_DEVICE),ef67)
 ifeq ($(TARGET_BOARD_PLATFORM),apq8084)
 
 QCACLD_SOURCE_PATH := $(LOCAL_PATH)
@@ -34,4 +34,4 @@ $(EF67_WLAN_BUILT_MODULE): TARGET_KERNEL_BINARIES $(EF67_WLAN_SOURCE_FILES) $(QC
 		ARCH=$(TARGET_ARCH) $(ARM_CROSS_COMPILE)
 
 endif # apq8084
-endif # ef67s
+endif # ef67
