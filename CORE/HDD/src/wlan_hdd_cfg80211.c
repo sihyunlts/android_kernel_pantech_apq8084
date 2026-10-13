@@ -709,7 +709,11 @@ static const struct nl80211_vendor_cmd_info wlan_hdd_cfg80211_vendor_events[] =
 };
 
 int is_driver_dfs_capable(struct wiphy *wiphy, struct wireless_dev *wdev,
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 108))
+                          const void *data, int data_len)
+#else
                           void *data, int data_len)
+#endif
 {
     u32 dfs_capability;
     struct sk_buff *temp_skbuff;
@@ -746,7 +750,11 @@ int is_driver_dfs_capable(struct wiphy *wiphy, struct wireless_dev *wdev,
 #ifdef WLAN_FEATURE_STATS_EXT
 static int wlan_hdd_cfg80211_stats_ext_request(struct wiphy *wiphy,
                                         struct wireless_dev *wdev,
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 108))
+                                        const void *data, int data_len)
+#else
                                         void *data, int data_len)
+#endif
 {
     tStatsExtRequestReq stats_ext_req;
     struct net_device *dev = wdev->netdev;
@@ -8608,9 +8616,23 @@ static int __wlan_hdd_cfg80211_del_station(struct wiphy *wiphy,
 }
 
 int wlan_hdd_cfg80211_del_station(struct wiphy *wiphy,
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 108))
+                                  struct net_device *dev,
+                                  struct station_del_parameters *params)
+#else
                                   struct net_device *dev, u8 *mac)
+#endif
 {
     int ret;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 108))
+    u8 address[ETH_ALEN];
+    u8 *mac = NULL;
+
+    if (params->mac) {
+        memcpy(address, params->mac, sizeof(address));
+        mac = address;
+    }
+#endif
 
     vos_ssr_protect(__func__);
     ret = __wlan_hdd_cfg80211_del_station(wiphy, dev, mac);
