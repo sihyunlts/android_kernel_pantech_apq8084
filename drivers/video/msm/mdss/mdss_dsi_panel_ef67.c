@@ -218,10 +218,12 @@ static int ef67_backlight_command(struct mdss_dsi_ctrl_pdata *ctrl,
 		.cmds_cnt = 1,
 		.flags = CMD_REQ_COMMIT | CMD_CLK_CTRL,
 	};
+	int ret;
 
 	/* COMMIT consumes this packet synchronously under cmd_mutex. */
 	usleep_range(1000, 1000);
-	return mdss_dsi_cmdlist_put(ctrl, &req);
+	ret = mdss_dsi_cmdlist_put(ctrl, &req);
+	return ret < 0 ? ret : 0;
 }
 
 void mdss_dsi_ef67_backlight(struct mdss_dsi_ctrl_pdata *ctrl, u32 level)
@@ -272,6 +274,9 @@ int mdss_dsi_ef67_panel_on(struct mdss_dsi_ctrl_pdata *ctrl)
 	mutex_lock(&panel->lock);
 	*panel->init_cabc = panel->cabc_enabled ? 3 : 0;
 	ret = mdss_dsi_cmdlist_put(ctrl, &req);
+	/* The merged MDSS host returns transmitted bytes on success. */
+	if (ret > 0)
+		ret = 0;
 	if (!ret)
 		panel->dimming_enabled = true;
 	mutex_unlock(&panel->lock);
@@ -322,6 +327,8 @@ int mdss_dsi_ef67_set_cabc(struct mdss_panel_data *pdata, bool enabled)
 	req.cmds = &panel->cabc_command;
 	if (panel->powered)
 		ret = mdss_dsi_cmdlist_put(ctrl, &req);
+	if (ret > 0)
+		ret = 0;
 	if (!ret) {
 		panel->cabc_enabled = enabled;
 		*panel->init_cabc = enabled ? 3 : 0;

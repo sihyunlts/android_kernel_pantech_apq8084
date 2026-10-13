@@ -620,7 +620,7 @@ static int mdss_dsi_panel_off(struct mdss_panel_data *pdata)
 
 	if (ctrl->off_cmds.cmd_cnt) {
 		rc = mdss_dsi_panel_cmds_send(ctrl, &ctrl->off_cmds);
-		if (ctrl->ef67_panel && rc)
+		if (ctrl->ef67_panel && rc < 0)
 			return rc;
 	}
 
