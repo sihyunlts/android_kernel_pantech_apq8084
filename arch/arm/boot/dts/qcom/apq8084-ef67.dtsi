@@ -964,10 +964,12 @@
 };
 
 &{/soc/sound} {
+	qcom,headset-jack-type-NO;
 	qcom,audio-routing = "RX_BIAS", "MCLK", "LDO_H", "MCLK", "AIF4 MAD", "MCLK", "AMIC1", "MIC BIAS1 Internal1", "MIC BIAS1 Internal1", "Handset Mic", "AMIC2", "MIC BIAS2 External", "MIC BIAS2 External", "Headset Mic", "AMIC3", "MIC BIAS1 External", "MIC BIAS1 External", "Handset Mic", "AMIC4", "MIC BIAS3 External", "MIC BIAS3 External", "Handset Mic", "DMIC1", "MIC BIAS1 External", "MIC BIAS1 External", "Digital Mic1", "DMIC2", "MIC BIAS1 External", "MIC BIAS1 External", "Digital Mic2", "DMIC3", "MIC BIAS3 External", "MIC BIAS3 External", "Digital Mic3", "DMIC4", "MIC BIAS1 External", "MIC BIAS1 External", "Digital Mic4";
 };
 
 &{/soc/sound-9330} {
+	qcom,headset-jack-type-NO;
 	qcom,audio-routing = "RX_BIAS", "MCLK", "LDO_H", "MCLK", "AIF4 MAD", "MCLK", "AMIC1", "MIC BIAS1 Internal1", "MIC BIAS1 Internal1", "Handset Mic", "AMIC2", "MIC BIAS2 External", "MIC BIAS2 External", "Headset Mic", "AMIC3", "MIC BIAS1 External", "MIC BIAS1 External", "Handset Mic", "AMIC4", "MIC BIAS3 External", "MIC BIAS3 External", "Handset Mic", "DMIC1", "MIC BIAS1 External", "MIC BIAS1 External", "Digital Mic1", "DMIC2", "MIC BIAS1 External", "MIC BIAS1 External", "Digital Mic2", "DMIC3", "MIC BIAS3 External", "MIC BIAS3 External", "Digital Mic3", "DMIC4", "MIC BIAS1 External", "MIC BIAS1 External", "Digital Mic4";
 };
 
