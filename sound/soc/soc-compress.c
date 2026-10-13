@@ -803,6 +803,9 @@ int soc_new_compress(struct snd_soc_pcm_runtime *rtd, int num)
 
 	capture = capture && cpu_dai->driver->capture.channels_min;
 	playback = playback && cpu_dai->driver->playback.channels_min;
+	/* CAF's dynamic compressed frontend below creates playback only. */
+	if (rtd->dai_link->dynamic)
+		capture = 0;
 
 	/*
 	 * Compress devices are unidirectional so only one of the directions
