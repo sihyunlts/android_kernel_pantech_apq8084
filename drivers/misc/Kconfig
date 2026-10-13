@@ -636,6 +636,11 @@ config FPC_BTP_EF67
 	help
 	  Provides the fpc_btp image capture interface and stock navigation
 	  input devices for the EF67 fingerprint sensor.
+config UID_CPUTIME
+	tristate "Per-UID cpu time statistics"
+	depends on PROFILING
+	help
+	  Per UID based cpu time statistics exported to /proc/uid_cputime
 
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"

@@ -1,4 +1,4 @@
-/* Copyright (c) 2008-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2008-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -282,21 +282,28 @@ fail:
 	return -ENOMEM;
 }
 
-static int diagchar_close(struct inode *inode, struct file *file)
+
+static int diag_remove_client_entry(struct file *file)
 {
 	int i = -1;
-	struct diagchar_priv *diagpriv_data = file->private_data;
+	struct diagchar_priv *diagpriv_data = NULL;
 	struct diag_dci_client_tbl *dci_entry = NULL;
 	unsigned long flags;
 
-	pr_debug("diag: process exit %s\n", current->comm);
-	if (!(file->private_data)) {
-		pr_alert("diag: Invalid file pointer");
-		return -ENOMEM;
-	}
-
 	if (!driver)
 		return -ENOMEM;
+
+	mutex_lock(&driver->diag_file_mutex);
+	if (!file) {
+		mutex_unlock(&driver->diag_file_mutex);
+		return -ENOENT;
+	}
+	if (!(file->private_data)) {
+		mutex_unlock(&driver->diag_file_mutex);
+		return -EINVAL;
+	}
+
+	diagpriv_data = file->private_data;
 
 	/* clean up any DCI registrations, if this is a DCI client
 	* This will specially help in case of ungraceful exit of any DCI client
@@ -340,6 +347,7 @@ static int diagchar_close(struct inode *inode, struct file *file)
 		diag_update_proc_vote(DIAG_PROC_MEMORY_DEVICE, VOTE_DOWN,
 				      ALL_PROC);
 		diag_switch_logging(USB_MODE);
+		diag_ws_reset(DIAG_WS_MD);
 	}
 #endif /* DIAG over USB */
 	/* Delete the pkt response table entry for the exiting process */
@@ -361,11 +369,18 @@ static int diagchar_close(struct inode *inode, struct file *file)
 			driver->client_map[i].pid = 0;
 			kfree(diagpriv_data);
 			diagpriv_data = NULL;
+			file->private_data = 0;
 			break;
 		}
 	}
 	mutex_unlock(&driver->diagchar_mutex);
+	mutex_unlock(&driver->diag_file_mutex);
 	return 0;
+}
+
+static int diagchar_close(struct inode *inode, struct file *file)
+{
+	return diag_remove_client_entry(file);
 }
 
 int diag_find_polling_reg(int i)
@@ -502,6 +517,7 @@ int diag_copy_remote(char __user *buf, size_t count, int *pret, int *pnum_data)
 	int ret = *pret;
 	int num_data = *pnum_data;
 	int remote_token;
+	int copy_data = 0;
 	unsigned long spin_lock_flags;
 	struct diag_write_device hsic_buf_tbl[NUM_HSIC_BUF_TBL_ENTRIES];
 
@@ -532,6 +548,9 @@ int diag_copy_remote(char __user *buf, size_t count, int *pret, int *pnum_data)
 					i, hsic_buf_tbl[i].buf,
 					hsic_buf_tbl[i].length);
 				num_data++;
+
+				diag_ws_on_copy(DIAG_WS_MD);
+				copy_data = 1;
 
 				/* Copy the negative token */
 				if (copy_to_user(buf+ret,
@@ -589,6 +608,8 @@ drop_hsic:
 		driver->in_busy_smux = 0;
 	}
 	exit_stat = 0;
+	if (copy_data)
+		diag_ws_on_copy_complete(DIAG_WS_MD);
 exit:
 	*pret = ret;
 	*pnum_data = num_data;
@@ -606,7 +627,9 @@ static int diag_copy_dci(char __user *buf, size_t count,
 {
 	int total_data_len = 0;
 	int ret = 0;
+	int write_len = 0;
 	int exit_stat = 1;
+	uint8_t drain_again = 0;
 	struct diag_dci_buffer_t *buf_entry, *temp;
 	struct diag_smd_info *smd_info = NULL;
 
@@ -616,20 +639,34 @@ static int diag_copy_dci(char __user *buf, size_t count,
 	ret = *pret;
 
 	ret += 4;
+	if (ret >= count) {
+		pr_err("diag: In %s, invalid value for ret: %d, count: %d\n",
+		       __func__, ret, count);
+		return -EINVAL;
+	}
 
 	mutex_lock(&entry->write_buf_mutex);
 	list_for_each_entry_safe(buf_entry, temp, &entry->list_write_buf,
 								buf_track) {
+
+		if ((total_data_len + buf_entry->data_len) > (count - ret)) {
+			drain_again = 1;
+			break;
+		}
+
 		list_del(&buf_entry->buf_track);
 		mutex_lock(&buf_entry->data_mutex);
 		if ((buf_entry->data_len > 0) &&
 		    (buf_entry->in_busy) &&
 		    (buf_entry->data)) {
 			if (copy_to_user(buf+ret, (void *)buf_entry->data,
-					 buf_entry->data_len))
+					 buf_entry->data_len)) {
+				pr_err("diag: pkt dropped\n");
 				goto drop;
+			}
 			ret += buf_entry->data_len;
 			total_data_len += buf_entry->data_len;
+			diag_ws_on_copy(DIAG_WS_DCI);
 drop:
 			buf_entry->in_busy = 0;
 			buf_entry->data_len = 0;
@@ -665,19 +702,23 @@ drop:
 
 	if (total_data_len > 0) {
 		/* Copy the total data length */
-		COPY_USER_SPACE_OR_EXIT(buf+8, total_data_len, 4);
-		ret -= 4;
+		write_len = copy_to_user(buf + 8, (void *)&total_data_len, 4);
+		if (write_len) {
+			goto exit;
+		}
 	} else {
 		pr_debug("diag: In %s, Trying to copy ZERO bytes, total_data_len: %d\n",
 			__func__, total_data_len);
 	}
 
-	entry->in_service = 0;
-	mutex_unlock(&entry->write_buf_mutex);
 
 	exit_stat = 0;
 exit:
+	entry->in_service = 0;
+	mutex_unlock(&entry->write_buf_mutex);
 	*pret = ret;
+	if (drain_again)
+		dci_drain_data(0);
 
 	return exit_stat;
 }
@@ -1389,7 +1430,8 @@ static ssize_t diagchar_read(struct file *file, char __user *buf, size_t count,
 	int num_data = 0, data_type;
 	int remote_token;
 	int exit_stat;
-	int clear_read_wakelock;
+	int copy_data = 0;
+	int copy_dci_data = 0;
 	unsigned long flags;
 
 	for (i = 0; i < driver->num_clients; i++)
@@ -1408,7 +1450,6 @@ static ssize_t diagchar_read(struct file *file, char __user *buf, size_t count,
 
 	mutex_lock(&driver->diagchar_mutex);
 
-	clear_read_wakelock = 0;
 	if ((driver->data_ready[index] & USER_SPACE_DATA_TYPE) && (driver->
 					logging_mode == MEMORY_DEVICE_MODE)) {
 		remote_token = 0;
@@ -1490,14 +1531,12 @@ drop:
 				COPY_USER_SPACE_OR_EXIT(buf+ret,
 					*(data->buf_in_1),
 					data->write_ptr_1->length);
-				if (!driver->real_time_mode) {
-					process_lock_on_copy(&data->nrt_lock);
-					clear_read_wakelock++;
-				}
 				spin_lock_irqsave(&data->in_busy_lock, flags);
 				data->in_busy_1 = 0;
 				spin_unlock_irqrestore(&data->in_busy_lock,
 						       flags);
+				diag_ws_on_copy(DIAG_WS_MD);
+				copy_data = 1;
 			}
 			if (data->in_busy_2 == 1) {
 				num_data++;
@@ -1508,14 +1547,12 @@ drop:
 				COPY_USER_SPACE_OR_EXIT(buf+ret,
 					*(data->buf_in_2),
 					data->write_ptr_2->length);
-				if (!driver->real_time_mode) {
-					process_lock_on_copy(&data->nrt_lock);
-					clear_read_wakelock++;
-				}
 				spin_lock_irqsave(&data->in_busy_lock, flags);
 				data->in_busy_2 = 0;
 				spin_unlock_irqrestore(&data->in_busy_lock,
 						       flags);
+				diag_ws_on_copy(DIAG_WS_MD);
+				copy_data = 1;
 			}
 		}
 		if (driver->supports_separate_cmdrsp) {
@@ -1566,7 +1603,9 @@ drop:
 		data_type = driver->data_ready[index] & DEINIT_TYPE;
 		COPY_USER_SPACE_OR_EXIT(buf, data_type, 4);
 		driver->data_ready[index] ^= DEINIT_TYPE;
-		goto exit;
+		mutex_unlock(&driver->diagchar_mutex);
+		diag_remove_client_entry(file);
+		return ret;
 	}
 
 	if (driver->data_ready[index] & MSG_MASKS_TYPE) {
@@ -1646,7 +1685,6 @@ drop:
 	if (driver->data_ready[index] & DCI_DATA_TYPE) {
 		/* Copy the type of data being passed */
 		data_type = driver->data_ready[index] & DCI_DATA_TYPE;
-		driver->data_ready[index] ^= DCI_DATA_TYPE;
 		list_for_each_safe(start, temp, &driver->dci_client_list) {
 			entry = list_entry(start, struct diag_dci_client_tbl,
 									track);
@@ -1658,7 +1696,9 @@ drop:
 								sizeof(int));
 			COPY_USER_SPACE_OR_EXIT(buf + ret,
 					entry->client_info.token, sizeof(int));
+			copy_dci_data = 1;
 			exit_stat = diag_copy_dci(buf, count, entry, &ret);
+			driver->data_ready[index] ^= DCI_DATA_TYPE;
 			if (exit_stat == 1)
 				goto exit;
 		}
@@ -1682,12 +1722,26 @@ drop:
 		goto exit;
 	}
 exit:
-	if (clear_read_wakelock) {
-		for (i = 0; i < NUM_SMD_DATA_CHANNELS; i++)
-			process_lock_on_copy_complete(
-				&driver->smd_data[i].nrt_lock);
-	}
 	mutex_unlock(&driver->diagchar_mutex);
+	if (copy_data) {
+		/*
+		 * Flush any work that is currently pending on the data
+		 * channels. This will ensure that the next read is not missed.
+		 */
+		for (i = 0; i < NUM_SMD_DATA_CHANNELS; i++)
+			flush_workqueue(driver->smd_data[i].wq);
+		wake_up(&driver->smd_wait_q);
+		diag_ws_on_copy_complete(DIAG_WS_MD);
+	}
+	if (copy_dci_data) {
+		/*
+		 * Flush any read that is currently pending on DCI data and
+		 * command channnels. This will ensure that the next read is not
+		 * missed.
+		 */
+		diag_ws_on_copy_complete(DIAG_WS_DCI);
+		flush_workqueue(driver->diag_dci_wq);
+	}
 	return ret;
 }
 
@@ -2160,6 +2214,172 @@ fail_free_copy:
 	return ret;
 }
 
+void diag_ws_init()
+{
+	driver->dci_ws.ref_count = 0;
+	driver->dci_ws.copy_count = 0;
+	spin_lock_init(&driver->dci_ws.lock);
+
+	driver->md_ws.ref_count = 0;
+	driver->md_ws.copy_count = 0;
+	spin_lock_init(&driver->md_ws.lock);
+
+	spin_lock_init(&driver->ws_lock);
+}
+
+void diag_ws_on_notify()
+{
+	/*
+	 * Do not deal with reference count here as there can be spurious
+	 * interrupts.
+	 */
+	pm_stay_awake(driver->diag_dev);
+}
+
+void diag_ws_on_read(int type, int pkt_len)
+{
+	unsigned long flags;
+	struct diag_ws_ref_t *ws_ref = NULL;
+
+	switch (type) {
+	case DIAG_WS_DCI:
+		ws_ref = &driver->dci_ws;
+		break;
+	case DIAG_WS_MD:
+		ws_ref = &driver->md_ws;
+		break;
+	default:
+		pr_err_ratelimited("diag: In %s, invalid type: %d\n",
+				   __func__, type);
+		return;
+	}
+
+	spin_lock_irqsave(&ws_ref->lock, flags);
+	if (pkt_len > 0) {
+		ws_ref->ref_count++;
+	} else {
+		if (ws_ref->ref_count < 1) {
+			ws_ref->ref_count = 0;
+			ws_ref->copy_count = 0;
+		}
+		diag_ws_release();
+	}
+	spin_unlock_irqrestore(&ws_ref->lock, flags);
+}
+
+
+void diag_ws_on_copy(int type)
+{
+	unsigned long flags;
+	struct diag_ws_ref_t *ws_ref = NULL;
+
+	switch (type) {
+	case DIAG_WS_DCI:
+		ws_ref = &driver->dci_ws;
+		break;
+	case DIAG_WS_MD:
+		ws_ref = &driver->md_ws;
+		break;
+	default:
+		pr_err_ratelimited("diag: In %s, invalid type: %d\n",
+				   __func__, type);
+		return;
+	}
+
+	spin_lock_irqsave(&ws_ref->lock, flags);
+	ws_ref->copy_count++;
+	spin_unlock_irqrestore(&ws_ref->lock, flags);
+}
+
+void diag_ws_on_copy_fail(int type)
+{
+	unsigned long flags;
+	struct diag_ws_ref_t *ws_ref = NULL;
+
+	switch (type) {
+	case DIAG_WS_DCI:
+		ws_ref = &driver->dci_ws;
+		break;
+	case DIAG_WS_MD:
+		ws_ref = &driver->md_ws;
+		break;
+	default:
+		pr_err_ratelimited("diag: In %s, invalid type: %d\n",
+				   __func__, type);
+		return;
+	}
+
+	spin_lock_irqsave(&ws_ref->lock, flags);
+	ws_ref->ref_count--;
+	spin_unlock_irqrestore(&ws_ref->lock, flags);
+
+	diag_ws_release();
+}
+
+void diag_ws_on_copy_complete(int type)
+{
+	unsigned long flags;
+	struct diag_ws_ref_t *ws_ref = NULL;
+
+	switch (type) {
+	case DIAG_WS_DCI:
+		ws_ref = &driver->dci_ws;
+		break;
+	case DIAG_WS_MD:
+		ws_ref = &driver->md_ws;
+		break;
+	default:
+		pr_err_ratelimited("diag: In %s, invalid type: %d\n",
+				   __func__, type);
+		return;
+	}
+
+	spin_lock_irqsave(&ws_ref->lock, flags);
+	ws_ref->ref_count -= ws_ref->copy_count;
+		if (ws_ref->ref_count < 1)
+			ws_ref->ref_count = 0;
+		ws_ref->copy_count = 0;
+	spin_unlock_irqrestore(&ws_ref->lock, flags);
+
+	diag_ws_release();
+}
+
+void diag_ws_reset(int type)
+{
+	unsigned long flags;
+	struct diag_ws_ref_t *ws_ref = NULL;
+
+	switch (type) {
+	case DIAG_WS_DCI:
+		ws_ref = &driver->dci_ws;
+		break;
+	case DIAG_WS_MD:
+		ws_ref = &driver->md_ws;
+		break;
+	default:
+		pr_err_ratelimited("diag: In %s, invalid type: %d\n",
+				   __func__, type);
+		return;
+	}
+
+	spin_lock_irqsave(&ws_ref->lock, flags);
+	ws_ref->ref_count = 0;
+	ws_ref->copy_count = 0;
+	spin_unlock_irqrestore(&ws_ref->lock, flags);
+
+	diag_ws_release();
+}
+
+void diag_ws_release()
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&driver->ws_lock, flags);
+	if (driver->dci_ws.ref_count == 0 && driver->md_ws.ref_count == 0)
+		pm_relax(driver->diag_dev);
+	spin_unlock_irqrestore(&driver->ws_lock, flags);
+}
+
 static int diag_real_time_info_init(void)
 {
 	int i;
@@ -2395,9 +2615,11 @@ static int __init diagchar_init(void)
 	driver->in_busy_pktdata = 0;
 	driver->in_busy_dcipktdata = 0;
 	mutex_init(&driver->diagchar_mutex);
+	mutex_init(&driver->diag_file_mutex);
 	init_waitqueue_head(&driver->wait_q);
 	init_waitqueue_head(&driver->smd_wait_q);
 	INIT_WORK(&(driver->diag_drain_work), diag_drain_work_fn);
+	diag_ws_init();
 	ret = diag_real_time_info_init();
 	if (ret)
 		goto fail;

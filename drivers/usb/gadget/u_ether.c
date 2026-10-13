@@ -129,9 +129,9 @@ struct eth_dev {
 	unsigned long		tx_throttle;
 	unsigned int		tx_aggr_cnt[DL_MAX_PKTS_PER_XFER];
 	unsigned int		tx_pkts_rcvd;
+	unsigned int		tx_bytes_rcvd;
 	unsigned int		loop_brk_cnt;
 	struct dentry		*uether_dent;
-	struct dentry		*uether_dfile;
 
 	enum ifc_state		state;
 	struct notifier_block	cpufreq_notifier;
@@ -384,7 +384,6 @@ static void rx_complete(struct usb_ep *ep, struct usb_request *req)
 	/* normal completion */
 	case 0:
 		skb_put(skb, req->actual);
-
 		if (dev->unwrap) {
 			unsigned long	flags;
 
@@ -443,7 +442,7 @@ clean:
 	spin_unlock(&dev->req_lock);
 
 	if (queue)
-		queue_work(uether_wq, &dev->rx_work);
+		queue_work_on(0, uether_wq, &dev->rx_work);
 }
 
 static int prealloc(struct list_head *list,
@@ -685,6 +684,15 @@ static void tx_complete(struct usb_ep *ep, struct usb_request *req)
 	case -ESHUTDOWN:		/* disconnect etc */
 		break;
 	case 0:
+		/*
+		 * Remove the header length, before updating tx_bytes in
+		 * net->stats, since when packet is received from network layer
+		 * this header is not added. So this will now give the exact
+		 * number of bytes sent to the host.
+		 */
+		if (req->num_sgs)
+			req->actual -= (req->num_sgs/2) * dev->header_len;
+
 		if (!req->zero)
 			dev->net->stats.tx_bytes += req->actual-1;
 		else
@@ -1027,6 +1035,7 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 	}
 
 	dev->tx_pkts_rcvd++;
+	dev->tx_bytes_rcvd += skb->len;
 	if (dev->gadget->sg_supported) {
 		skb_queue_tail(&dev->tx_skb_q, skb);
 		if (dev->tx_skb_q.qlen > tx_stop_threshold) {
@@ -1382,16 +1391,29 @@ static int rmnet_ioctl_extended(struct net_device *dev, struct ifreq *ifr)
 		if ((size_t)ext_cmd.u.data > 0x4000)
 			return -EINVAL;
 
-		eth_dev->port_usb->is_fixed = true;
-		eth_dev->port_usb->fixed_out_len = (size_t) ext_cmd.u.data;
-		DBG("[%s] rmnet_ioctl(): SET MRU to %u\n", dev->name,
+		if (eth_dev->port_usb) {
+			eth_dev->port_usb->is_fixed = true;
+			eth_dev->port_usb->fixed_out_len =
+				(size_t) ext_cmd.u.data;
+			DBG("[%s] rmnet_ioctl(): SET MRU to %u\n", dev->name,
 				eth_dev->mru);
+		} else {
+			pr_err("[%s]: %s: SET MRU failed. Cable disconnected\n",
+				dev->name, __func__);
+			return -ENODEV;
+		}
 		break;
 
 	case RMNET_IOCTL_GET_MRU:
-		ext_cmd.u.data = eth_dev->port_usb->is_fixed ?
+		if (eth_dev->port_usb) {
+			ext_cmd.u.data = eth_dev->port_usb->is_fixed ?
 					eth_dev->port_usb->fixed_out_len :
 					dev->mtu;
+		} else {
+			pr_err("[%s]: %s: GET MRU failed. Cable disconnected\n",
+				dev->name, __func__);
+			return -ENODEV;
+		}
 		break;
 
 	case RMNET_IOCTL_GET_DRIVER_NAME:
@@ -1936,6 +1958,38 @@ const struct file_operations uether_stats_ops = {
 	.write = uether_stat_reset,
 };
 
+static int uether_bytes_rcvd_show(struct seq_file *s, void *unused)
+{
+	struct eth_dev *dev = s->private;
+
+	if (dev)
+		seq_printf(s, "%u\n", dev->tx_bytes_rcvd);
+
+	return 0;
+}
+
+static int uether_bytes_rcvd_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, uether_bytes_rcvd_show, inode->i_private);
+}
+
+static ssize_t uether_bytes_rcvd_reset(struct file *file,
+		const char __user *ubuf, size_t count, loff_t *ppos)
+{
+	struct seq_file *s = file->private_data;
+	struct eth_dev *dev = s->private;
+
+	dev->tx_bytes_rcvd = 0;
+
+	return count;
+}
+
+const struct file_operations uether_bytes_rcvd_ops = {
+	.open = uether_bytes_rcvd_open,
+	.read = seq_read,
+	.write = uether_bytes_rcvd_reset,
+};
+
 static void uether_debugfs_init(struct eth_dev *dev, const char *name)
 {
 	struct dentry *uether_dent;
@@ -1950,20 +2004,21 @@ static void uether_debugfs_init(struct eth_dev *dev, const char *name)
 				uether_dent, dev, &uether_stats_ops);
 	if (!uether_dfile || IS_ERR(uether_dfile))
 		debugfs_remove(uether_dent);
-	dev->uether_dfile = uether_dfile;
+
+	uether_dfile = debugfs_create_file("tx_bytes_rcvd", S_IRUGO | S_IWUSR,
+				uether_dent, dev, &uether_bytes_rcvd_ops);
+	if (!uether_dfile || IS_ERR(uether_dfile))
+		debugfs_remove_recursive(uether_dent);
 }
 
 static void uether_debugfs_exit(struct eth_dev *dev)
 {
-	debugfs_remove(dev->uether_dfile);
-	debugfs_remove(dev->uether_dent);
-	dev->uether_dent = NULL;
-	dev->uether_dfile = NULL;
+	debugfs_remove_recursive(dev->uether_dent);
 }
 
 static int __init gether_init(void)
 {
-	uether_wq  = create_singlethread_workqueue("uether");
+	uether_wq = alloc_workqueue("uether", WQ_CPU_INTENSIVE, 1);
 	if (!uether_wq) {
 		pr_err("%s: Unable to create workqueue: uether\n", __func__);
 		return -ENOMEM;

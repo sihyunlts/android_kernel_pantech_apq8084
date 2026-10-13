@@ -119,7 +119,7 @@ static void create_dci_event_mask_tbl(unsigned char *tbl_buf)
 		memset(tbl_buf, 0, DCI_EVENT_MASK_SIZE);
 }
 
-static void dci_drain_data(unsigned long data)
+void dci_drain_data(unsigned long data)
 {
 	queue_work(driver->diag_dci_wq, &dci_data_drain_work);
 }
@@ -128,7 +128,7 @@ static void dci_check_drain_timer(void)
 {
 	if (!dci_timer_in_progress) {
 		dci_timer_in_progress = 1;
-		 mod_timer(&dci_drain_timer, jiffies + msecs_to_jiffies(500));
+		mod_timer(&dci_drain_timer, jiffies + msecs_to_jiffies(500));
 	}
 }
 
@@ -190,6 +190,12 @@ static void dci_add_buffer_to_list(struct diag_dci_client_tbl *client,
 
 	mutex_lock(&client->write_buf_mutex);
 	list_add_tail(&buf->buf_track, &client->list_write_buf);
+	/*
+	 * In the case of DCI, there can be multiple packets in one read. To
+	 * calculate the wakeup source reference count, we must account for each
+	 * packet in a single read.
+	 */
+	diag_ws_on_read(DIAG_WS_DCI, buf->data_len);
 	mutex_lock(&buf->data_mutex);
 	buf->in_busy = 1;
 	buf->in_list = 1;
@@ -279,6 +285,7 @@ void dci_data_drain_work_fn(struct work_struct *work)
 		for (i = 0; i < entry->num_buffers; i++) {
 			proc_buf = &entry->buffers[i];
 
+			mutex_lock(&proc_buf->buf_mutex);
 			buf_temp = proc_buf->buf_primary;
 			if (DCI_CAN_ADD_BUF_TO_LIST(buf_temp))
 				dci_add_buffer_to_list(entry, buf_temp);
@@ -290,10 +297,9 @@ void dci_data_drain_work_fn(struct work_struct *work)
 			buf_temp = proc_buf->buf_curr;
 			if (DCI_CAN_ADD_BUF_TO_LIST(buf_temp)) {
 				dci_add_buffer_to_list(entry, buf_temp);
-				mutex_lock(&proc_buf->buf_mutex);
 				proc_buf->buf_curr = NULL;
-				mutex_unlock(&proc_buf->buf_mutex);
 			}
+			mutex_unlock(&proc_buf->buf_mutex);
 		}
 		if (!list_empty(&entry->list_write_buf) && !entry->in_service) {
 			mutex_lock(&entry->write_buf_mutex);
@@ -470,7 +476,6 @@ end:
 	/* wake up all sleeping DCI clients which have some data */
 	diag_dci_wakeup_clients();
 	dci_check_drain_timer();
-	diag_dci_try_deactivate_wakeup_source();
 	return 0;
 }
 
@@ -491,7 +496,7 @@ int diag_process_smd_dci_read_data(struct diag_smd_info *smd_info, void *buf,
 	 * process DCI data
 	 */
 	if (driver->num_dci_client == 0) {
-		diag_dci_try_deactivate_wakeup_source();
+		diag_ws_reset(DIAG_WS_DCI);
 		return 0;
 	}
 
@@ -511,7 +516,7 @@ int diag_process_smd_dci_read_data(struct diag_smd_info *smd_info, void *buf,
 		if ((dci_pkt_len + 5) > (recd_bytes - read_bytes)) {
 			pr_err("diag: Invalid length in %s, len: %d, dci_pkt_len: %d",
 				__func__, recd_bytes, dci_pkt_len);
-			diag_dci_try_deactivate_wakeup_source();
+			diag_ws_release();
 			return 0;
 		}
 		/*
@@ -520,8 +525,10 @@ int diag_process_smd_dci_read_data(struct diag_smd_info *smd_info, void *buf,
 		 */
 		err = diag_process_single_dci_pkt(buf + 4, dci_pkt_len,
 					smd_info->peripheral, DCI_LOCAL_PROC);
-		if (err)
+		if (err) {
+			diag_ws_release();
 			break;
+		}
 		read_bytes += 5 + dci_pkt_len;
 		buf += 5 + dci_pkt_len; /* advance to next DCI pkt */
 	}
@@ -529,7 +536,6 @@ int diag_process_smd_dci_read_data(struct diag_smd_info *smd_info, void *buf,
 	/* wake up all sleeping DCI clients which have some data */
 	diag_dci_wakeup_clients();
 	dci_check_drain_timer();
-	diag_dci_try_deactivate_wakeup_source();
 	return 0;
 }
 
@@ -630,8 +636,6 @@ static struct dci_pkt_req_entry_t *diag_register_dci_transaction(int uid,
 	entry->client_id = client_id;
 	entry->uid = uid;
 	entry->tag = driver->dci_tag;
-	pr_debug("diag: Registering DCI cmd req, client_id: %d, uid: %d, tag:%d\n",
-				entry->client_id, entry->uid, entry->tag);
 	list_add_tail(&entry->track, &driver->dci_req_list);
 	mutex_unlock(&driver->dci_mutex);
 
@@ -723,6 +727,7 @@ void extract_dci_ctrl_pkt(unsigned char *buf, int len, int token)
 		return;
 	}
 
+	diag_ws_on_read(DIAG_WS_DCI, len);
 	header = (struct diag_ctrl_dci_status *)temp;
 	temp += sizeof(struct diag_ctrl_dci_status);
 	read_len += sizeof(struct diag_ctrl_dci_status);
@@ -731,7 +736,7 @@ void extract_dci_ctrl_pkt(unsigned char *buf, int len, int token)
 		if (read_len > len) {
 			pr_err("diag: Invalid length len: %d in %s\n", len,
 								__func__);
-			return;
+			goto err;
 		}
 
 		switch (*(uint8_t *)temp) {
@@ -747,7 +752,7 @@ void extract_dci_ctrl_pkt(unsigned char *buf, int len, int token)
 		default:
 			pr_err("diag: In %s, unknown peripheral, peripheral: %d\n",
 				__func__, *(uint8_t *)temp);
-			return;
+			goto err;
 		}
 		temp += sizeof(uint8_t);
 		read_len += sizeof(uint8_t);
@@ -758,6 +763,13 @@ void extract_dci_ctrl_pkt(unsigned char *buf, int len, int token)
 		read_len += sizeof(uint8_t);
 		diag_dci_notify_client(peripheral_mask, status, token);
 	}
+err:
+	/*
+	 * DCI control packets are not consumed by the clients. Mimic client
+	 * consumption by setting and clearing the wakeup source copy_count
+	 * explicitly.
+	 */
+	diag_ws_on_copy_fail(DIAG_WS_DCI);
 }
 
 void extract_dci_pkt_rsp(unsigned char *buf, int len, int data_source,
@@ -819,6 +831,7 @@ void extract_dci_pkt_rsp(unsigned char *buf, int len, int data_source,
 	if (delete_flag < 0)
 		return;
 
+	mutex_lock(&entry->buffers[data_source].buf_mutex);
 	rsp_buf = entry->buffers[data_source].buf_cmd;
 
 	mutex_lock(&rsp_buf->data_mutex);
@@ -835,6 +848,7 @@ void extract_dci_pkt_rsp(unsigned char *buf, int len, int data_source,
 		if (!temp_buf) {
 			pr_err("diag: DCI realloc failed\n");
 			mutex_unlock(&rsp_buf->data_mutex);
+			mutex_unlock(&entry->buffers[data_source].buf_mutex);
 			return;
 		} else {
 			rsp_buf->data = temp_buf;
@@ -869,6 +883,7 @@ void extract_dci_pkt_rsp(unsigned char *buf, int len, int data_source,
 	 * for log and event buffers to be full
 	 */
 	dci_add_buffer_to_list(entry, rsp_buf);
+	mutex_unlock(&entry->buffers[data_source].buf_mutex);
 }
 
 static void copy_dci_event(unsigned char *buf, int len,
@@ -1626,13 +1641,15 @@ static int diag_process_dci_pkt_rsp(unsigned char *buf, int len)
 				 * registered on the Apps Processor
 				 */
 				if (entry.cmd_code_lo == MODE_CMD &&
-				    entry.cmd_code_hi == MODE_CMD)
+				    entry.cmd_code_hi == MODE_CMD &&
+				    header->subsys_id == RESET_ID) {
 					if (entry.client_id != APPS_DATA)
 						continue;
-					ret = diag_send_dci_pkt(entry, req_buf,
-								req_len,
-								req_entry->tag);
-					found = 1;
+				}
+				ret = diag_send_dci_pkt(entry, req_buf,
+							req_len,
+							req_entry->tag);
+				found = 1;
 			}
 		}
 	}
@@ -2570,21 +2587,6 @@ int diag_dci_set_real_time(struct diag_dci_client_tbl *entry, uint8_t real_time)
 	return 1;
 }
 
-void diag_dci_try_activate_wakeup_source()
-{
-	spin_lock_irqsave(&ws_lock, ws_lock_flags);
-	pm_wakeup_event(driver->diag_dev, DCI_WAKEUP_TIMEOUT);
-	pm_stay_awake(driver->diag_dev);
-	spin_unlock_irqrestore(&ws_lock, ws_lock_flags);
-}
-
-void diag_dci_try_deactivate_wakeup_source()
-{
-	spin_lock_irqsave(&ws_lock, ws_lock_flags);
-	pm_relax(driver->diag_dev);
-	spin_unlock_irqrestore(&ws_lock, ws_lock_flags);
-}
-
 int diag_dci_register_client(struct diag_dci_reg_tbl_t *reg_entry)
 {
 	int i, err = 0;
@@ -2806,7 +2808,12 @@ int diag_dci_deinit_client(struct diag_dci_client_tbl *entry)
 			smd_info->in_busy_1 = 0;
 			mutex_unlock(&buf_entry->data_mutex);
 		}
-		diag_dci_try_deactivate_wakeup_source();
+		/*
+		 * These are buffers that can't be written to the client which
+		 * means that the copy cannot be completed. Make sure that we
+		 * remove those references in DCI wakeup source.
+		 */
+		diag_ws_on_copy_fail(DIAG_WS_DCI);
 	}
 	mutex_unlock(&entry->write_buf_mutex);
 

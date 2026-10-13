@@ -18,6 +18,8 @@
 #include <linux/jiffies.h>
 #include <linux/sched.h>
 #include <linux/msm_audio_ion.h>
+#include <linux/delay.h>
+#include <linux/module.h>
 #include <sound/apr_audio-v2.h>
 #include <sound/q6afe-v2.h>
 #include <sound/q6audio-v2.h>
@@ -31,6 +33,10 @@ enum {
 	MAX_AFE_CAL_TYPES
 };
 
+enum {
+	STATUS_PORT_STARTED, /* track if AFE port has started */
+	STATUS_MAX
+};
 
 struct afe_ctl {
 	void *apr;
@@ -54,12 +60,20 @@ struct afe_ctl {
 	int vi_tx_port;
 	uint32_t afe_sample_rates[AFE_MAX_PORTS];
 	struct aanc_data aanc_info;
-	struct mutex mem_map_lock;
+	struct mutex afe_cmd_lock;
 };
 
 static atomic_t afe_ports_mad_type[SLIMBUS_PORT_LAST - SLIMBUS_0_RX];
 static unsigned long afe_configured_cmd;
 
+struct msm_dai_q6_hdmi_dai_data {
+	DECLARE_BITMAP(status_mask, STATUS_MAX);
+	u32 rate;
+	u32 channels;
+	union afe_port_config port_config;
+};
+
+static atomic_t hdmi_port_start;
 static struct afe_ctl this_afe;
 
 #define TIMEOUT_MS 1000
@@ -89,7 +103,6 @@ void afe_set_aanc_info(struct aanc_data *q6_aanc_info)
 		this_afe.aanc_info.aanc_rx_port,
 		this_afe.aanc_info.aanc_tx_port);
 }
-
 
 static int32_t afe_callback(struct apr_client_data *data, void *priv)
 {
@@ -219,13 +232,12 @@ static int32_t afe_callback(struct apr_client_data *data, void *priv)
 			break;
 		}
 		default:
-			pr_err("%s: default case 0x%x\n", __func__, port_id);
+			pr_debug("%s: default case 0x%x\n", __func__, port_id);
 			break;
 		}
 	}
 	return 0;
 }
-
 
 int afe_get_port_type(u16 port_id)
 {
@@ -1565,6 +1577,7 @@ int afe_port_start(u16 port_id, union afe_port_config *afe_config,
 		return ret;
 	}
 
+	mutex_lock(&this_afe.afe_cmd_lock);
 	afe_send_cal(port_id);
 	afe_send_hw_delay(port_id, rate);
 
@@ -1577,13 +1590,14 @@ int afe_port_start(u16 port_id, union afe_port_config *afe_config,
 			!afe_has_config(AFE_SLIMBUS_SLAVE_CONFIG)) {
 				pr_err("%s: AFE isn't configured yet for\n"
 					   "HW MAD try Again\n", __func__);
-				return -EAGAIN;
+				ret = -EAGAIN;
+				goto fail_cmd;
 		}
 		ret = afe_turn_onoff_hw_mad(mad_type, true);
 		if (ret) {
 			pr_err("%s: afe_turn_onoff_hw_mad failed %d\n",
 			       __func__, ret);
-			return ret;
+			goto fail_cmd;
 		}
 	}
 
@@ -1636,6 +1650,7 @@ int afe_port_start(u16 port_id, union afe_port_config *afe_config,
 		cfg_type = AFE_PARAM_ID_I2S_CONFIG;
 		break;
 	case HDMI_RX:
+		atomic_set(&hdmi_port_start, 1);
 		cfg_type = AFE_PARAM_ID_HDMI_CONFIG;
 		break;
 	case VOICE_PLAYBACK_TX:
@@ -1706,9 +1721,12 @@ int afe_port_start(u16 port_id, union afe_port_config *afe_config,
 		ret = -EINVAL;
 		goto fail_cmd;
 	}
-	return afe_send_cmd_port_start(port_id);
+	ret = afe_send_cmd_port_start(port_id);
 
 fail_cmd:
+	if (port_id == HDMI_RX)
+		atomic_set(&hdmi_port_start, 0);
+	mutex_unlock(&this_afe.afe_cmd_lock);
 	return ret;
 }
 
@@ -1781,6 +1799,29 @@ int afe_get_port_index(u16 port_id)
 	}
 }
 
+int afe_short_silence(u32 duration)
+{
+	struct msm_dai_q6_hdmi_dai_data dai_data;
+	u16 bit_width = 16;
+	if (atomic_read(&hdmi_port_start) == 1)
+		return 0;
+
+	dai_data.rate = 48000;
+	dai_data.channels = 2;
+	dai_data.port_config.hdmi_multi_ch.bit_width = bit_width;
+	dai_data.port_config.hdmi_multi_ch.channel_allocation = 0;
+
+	afe_port_start(HDMI_RX, &dai_data.port_config,
+			dai_data.rate);
+
+	msleep(duration);
+
+	afe_close(HDMI_RX);
+
+	return 0;
+}
+EXPORT_SYMBOL(afe_short_silence);
+
 int afe_open(u16 port_id,
 		union afe_port_config *afe_config, int rate)
 {
@@ -1824,9 +1865,9 @@ int afe_open(u16 port_id,
 	if (ret < 0) {
 		pr_err("%s: Failed : Invalid Port id = 0x%x ret %d\n",
 			__func__, port_id, ret);
-		ret = -EINVAL;
-		goto fail_cmd;
+		return -EINVAL;
 	}
+	mutex_lock(&this_afe.afe_cmd_lock);
 
 	config.hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
 				APR_HDR_LEN(APR_HDR_SIZE), APR_PKT_VER);
@@ -1924,6 +1965,7 @@ int afe_open(u16 port_id,
 	}
 
 fail_cmd:
+	mutex_unlock(&this_afe.afe_cmd_lock);
 	return ret;
 }
 
@@ -2272,7 +2314,7 @@ int q6afe_audio_client_buf_alloc_contiguous(unsigned int dir,
 
 	ac->port[dir].buf = buf;
 
-	rc = msm_audio_ion_alloc("audio_client", &buf[0].client,
+	rc = msm_audio_ion_alloc("afe_client", &buf[0].client,
 				&buf[0].handle, bufsz*bufcnt,
 				&buf[0].phys, &len,
 				&buf[0].data);
@@ -2321,18 +2363,18 @@ int afe_memory_map(phys_addr_t dma_addr_p, u32 dma_buf_sz,
 {
 	int ret = 0;
 
-	mutex_lock(&this_afe.mem_map_lock);
+	mutex_lock(&this_afe.afe_cmd_lock);
 	ac->mem_map_handle = 0;
 	ret = afe_cmd_memory_map(dma_addr_p, dma_buf_sz);
 	if (ret < 0) {
 		pr_err("%s: afe_cmd_memory_map failed %d\n",
 			__func__, ret);
 
-		mutex_unlock(&this_afe.mem_map_lock);
+		mutex_unlock(&this_afe.afe_cmd_lock);
 		return ret;
 	}
 	ac->mem_map_handle = this_afe.mmap_handle;
-	mutex_unlock(&this_afe.mem_map_lock);
+	mutex_unlock(&this_afe.afe_cmd_lock);
 
 	return ret;
 }
@@ -3252,8 +3294,9 @@ int afe_close(int port_id)
 			__func__, pcm_afe_instance[port_id & 0x1]);
 		port_id = VIRTUAL_ID_TO_PORTID(port_id);
 		pcm_afe_instance[port_id & 0x1]--;
-		if (!(pcm_afe_instance[port_id & 0x1] == 0 &&
-			proxy_afe_instance[port_id & 0x1] == 0))
+		if ((!(pcm_afe_instance[port_id & 0x1] == 0 &&
+			proxy_afe_instance[port_id & 0x1] == 0)) ||
+			afe_close_done[port_id & 0x1] == true)
 			return 0;
 		else
 			afe_close_done[port_id & 0x1] = true;
@@ -3265,8 +3308,9 @@ int afe_close(int port_id)
 			__func__, proxy_afe_instance[port_id & 0x1]);
 		port_id = VIRTUAL_ID_TO_PORTID(port_id);
 		proxy_afe_instance[port_id & 0x1]--;
-		if (!(pcm_afe_instance[port_id & 0x1] == 0 &&
-			proxy_afe_instance[port_id & 0x1] == 0))
+		if ((!(pcm_afe_instance[port_id & 0x1] == 0 &&
+			proxy_afe_instance[port_id & 0x1] == 0)) ||
+			afe_close_done[port_id & 0x1] == true)
 			return 0;
 		else
 			afe_close_done[port_id & 0x1] = true;
@@ -3328,6 +3372,8 @@ int afe_close(int port_id)
 	if (ret)
 		pr_err("%s: AFE close failed %d\n", __func__, ret);
 
+	if (port_id == HDMI_RX)
+		atomic_set(&hdmi_port_start, 0);
 fail_cmd:
 	return ret;
 }
@@ -3357,6 +3403,7 @@ int afe_set_lpass_clock(u16 port_id, struct afe_clk_cfg *cfg)
 		return ret;
 	}
 
+	mutex_lock(&this_afe.afe_cmd_lock);
 	clk_cfg.hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
 				APR_HDR_LEN(APR_HDR_SIZE), APR_PKT_VER);
 	clk_cfg.hdr.pkt_size = sizeof(clk_cfg);
@@ -3410,6 +3457,7 @@ int afe_set_lpass_clock(u16 port_id, struct afe_clk_cfg *cfg)
 	}
 
 fail_cmd:
+	mutex_unlock(&this_afe.afe_cmd_lock);
 	return ret;
 }
 
@@ -3572,7 +3620,7 @@ int afe_spk_prot_get_calib_data(struct afe_spkr_prot_get_vi_calib *calib_resp)
 	}
 	memcpy(&calib_resp->res_cfg , &this_afe.calib_data.res_cfg,
 		sizeof(this_afe.calib_data.res_cfg));
-	pr_debug("%s: state %d resistance %d\n", __func__,
+	pr_info("%s: state %d resistance %d\n", __func__,
 			 calib_resp->res_cfg.th_vi_ca_state,
 			 calib_resp->res_cfg.r0_cali_q24);
 	ret = 0;
@@ -3634,7 +3682,7 @@ static int __init afe_init(void)
 	this_afe.dtmf_gen_rx_portid = -1;
 	this_afe.mmap_handle = 0;
 	this_afe.vi_tx_port = -1;
-	mutex_init(&this_afe.mem_map_lock);
+	mutex_init(&this_afe.afe_cmd_lock);
 	for (i = 0; i < AFE_MAX_PORTS; i++)
 		init_waitqueue_head(&this_afe.wait[i]);
 
@@ -3649,6 +3697,7 @@ static void __exit afe_exit(void)
 	u32 handle;
 
 	config_debug_fs_exit();
+	mutex_destroy(&this_afe.afe_cmd_lock);
 	for (i = 0; i < ARRAY_SIZE(this_afe.mem_map_cal_handles); i++) {
 		hptr = &this_afe.mem_map_cal_handles[i];
 		handle = atomic_xchg(hptr, 0);

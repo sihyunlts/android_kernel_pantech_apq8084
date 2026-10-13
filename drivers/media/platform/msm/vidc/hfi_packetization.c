@@ -904,7 +904,10 @@ int create_pkt_cmd_session_set_property(
 		struct hfi_enable *hfi;
 		pkt->rg_property_data[0] = HFI_PROPERTY_CONFIG_REALTIME;
 		hfi = (struct hfi_enable *) &pkt->rg_property_data[1];
-		hfi->enable = ((struct hfi_enable *) pdata)->enable;
+		/* firmware has inverted vaules for realtime and
+		 * non-realtime priority
+		 */
+		hfi->enable = !(((struct hfi_enable *) pdata)->enable);
 		pkt->size += sizeof(u32) * 2;
 		break;
 	}
@@ -1638,7 +1641,7 @@ int create_pkt_cmd_session_set_property(
 		struct hfi_ltrmode *hfi;
 		struct hal_ltrmode *hal = pdata;
 		pkt->rg_property_data[0] =
-			HFI_PROPERTY_PARAM_VENC_H264_LTRMODE;
+			HFI_PROPERTY_PARAM_VENC_LTRMODE;
 		hfi = (struct hfi_ltrmode *) &pkt->rg_property_data[1];
 		hfi->ltrmode = get_hfi_ltr_mode(hal->ltrmode);
 		hfi->ltrcount = hal->ltrcount;
@@ -1651,7 +1654,7 @@ int create_pkt_cmd_session_set_property(
 		struct hfi_ltruse *hfi;
 		struct hal_ltruse *hal = pdata;
 		pkt->rg_property_data[0] =
-			HFI_PROPERTY_CONFIG_VENC_H264_USELTRFRAME;
+			HFI_PROPERTY_CONFIG_VENC_USELTRFRAME;
 		hfi = (struct hfi_ltruse *) &pkt->rg_property_data[1];
 		hfi->frames = hal->frames;
 		hfi->refltr = hal->refltr;
@@ -1664,10 +1667,10 @@ int create_pkt_cmd_session_set_property(
 		struct hfi_ltrmark *hfi;
 		struct hal_ltrmark *hal = pdata;
 		pkt->rg_property_data[0] =
-			HFI_PROPERTY_CONFIG_VENC_H264_MARKLTRFRAME;
+			HFI_PROPERTY_CONFIG_VENC_MARKLTRFRAME;
 		hfi = (struct hfi_ltrmark *) &pkt->rg_property_data[1];
 		hfi->markframe = hal->markframe;
-		pkt->size += sizeof(u32) * 2;
+		pkt->size += sizeof(u32) + sizeof(struct hfi_ltrmark);
 		break;
 	}
 	case HAL_PARAM_VENC_HIER_P_MAX_ENH_LAYERS:
@@ -1700,6 +1703,22 @@ int create_pkt_cmd_session_set_property(
 		memcpy(hfi->csc_limit, hal->csc_limit, sizeof(hfi->csc_limit));
 		pkt->size += sizeof(u32) +
 				sizeof(struct hfi_vpe_color_space_conversion);
+		break;
+	}
+	case HAL_PARAM_VENC_ENABLE_INITIAL_QP:
+	{
+		struct hfi_initial_quantization *hfi;
+		struct hal_initial_quantization *quant = pdata;
+		pkt->rg_property_data[0] =
+			HFI_PROPERTY_PARAM_VENC_INITIAL_QP;
+		hfi = (struct hfi_initial_quantization *)
+			&pkt->rg_property_data[1];
+		hfi->init_qp_enable = quant->init_qp_enable;
+		hfi->qp_i = quant->qpi;
+		hfi->qp_p = quant->qpp;
+		hfi->qp_b = quant->qpb;
+		pkt->size += sizeof(u32) +
+			sizeof(struct hfi_initial_quantization);
 		break;
 	}
 	/* FOLLOWING PROPERTIES ARE NOT IMPLEMENTED IN CORE YET */

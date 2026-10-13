@@ -1,4 +1,4 @@
-/* Copyright (c) 2008-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2008-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -160,8 +160,6 @@
 #define NUM_DCI_PERIPHERALS	(NUM_SMD_DATA_CHANNELS + 1)
 
 /* Indicates the number of processors that support DCI */
-#define NUM_DCI_PROC		2
-
 #define SMD_DATA_TYPE 0
 #define SMD_CNTL_TYPE 1
 #define SMD_DCI_TYPE 2
@@ -190,6 +188,9 @@
 /* Local Processor only */
 #define DIAG_NUM_PROC	1
 #endif
+
+#define DIAG_WS_DCI		0
+#define DIAG_WS_MD		1
 
 /* Maximum number of pkt reg supported at initialization*/
 extern int diag_max_reg;
@@ -254,14 +255,6 @@ struct diag_client_map {
 	int pid;
 };
 
-struct diag_nrt_wake_lock {
-	int enabled;
-	int ref_count;
-	int copy_count;
-	struct wake_lock read_lock;
-	spinlock_t read_spinlock;
-};
-
 struct real_time_vote_t {
 	int client_id;
 	uint16_t proc;
@@ -272,6 +265,12 @@ struct real_time_query_t {
 	int real_time;
 	int proc;
 } __packed;
+
+struct diag_ws_ref_t {
+	int ref_count;
+	int copy_count;
+	spinlock_t lock;
+};
 
 /* This structure is defined in USB header file */
 #ifndef CONFIG_DIAG_OVER_USB
@@ -314,8 +313,6 @@ struct diag_smd_info {
 	struct diag_request *write_ptr_1;
 	struct diag_request *write_ptr_2;
 
-	struct diag_nrt_wake_lock nrt_lock;
-
 	struct workqueue_struct *wq;
 
 	struct work_struct diag_read_smd_work;
@@ -346,6 +343,7 @@ struct diagchar_dev {
 	struct device *diag_dev;
 	int ref_count;
 	struct mutex diagchar_mutex;
+	struct mutex diag_file_mutex;
 	wait_queue_head_t wait_q;
 	wait_queue_head_t smd_wait_q;
 	struct diag_client_map *client_map;
@@ -472,6 +470,10 @@ struct diagchar_dev {
 	int logging_process_id;
 	struct task_struct *socket_process;
 	struct task_struct *callback_process;
+	/* Power related variables */
+	struct diag_ws_ref_t dci_ws;
+	struct diag_ws_ref_t md_ws;
+	spinlock_t ws_lock;
 
 #ifdef CONFIG_DIAGFWD_BRIDGE_CODE
 	/* common for all bridges */
@@ -499,5 +501,14 @@ extern uint16_t wrap_count;
 void diag_get_timestamp(char *time_str);
 int diag_find_polling_reg(int i);
 void check_drain_timer(void);
+
+void diag_ws_init(void);
+void diag_ws_on_notify(void);
+void diag_ws_on_read(int type, int pkt_len);
+void diag_ws_on_copy(int type);
+void diag_ws_on_copy_fail(int type);
+void diag_ws_on_copy_complete(int type);
+void diag_ws_reset(int type);
+void diag_ws_release(void);
 
 #endif

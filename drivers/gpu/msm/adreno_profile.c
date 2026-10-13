@@ -89,7 +89,7 @@ static const char *get_api_type_str(unsigned int type)
 static inline void _create_ib_ref(struct kgsl_memdesc *memdesc,
 		unsigned int *cmd, unsigned int cnt, unsigned int off)
 {
-	cmd[0] = CP_HDR_INDIRECT_BUFFER_PFD;
+	cmd[0] = CP_HDR_INDIRECT_BUFFER_PFE;
 	cmd[1] = memdesc->gpuaddr + off;
 	cmd[2] = cnt;
 }
@@ -666,6 +666,15 @@ static ssize_t profile_assignments_write(struct file *filep,
 	if (len >= PAGE_SIZE || len == 0)
 		return -EINVAL;
 
+	buf = kmalloc(len + 1, GFP_KERNEL);
+	if (buf == NULL)
+		return -ENOMEM;
+
+	if (copy_from_user(buf, user_buf, len)) {
+		size = -EFAULT;
+		goto error_free;
+	}
+
 	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
 
 	if (adreno_profile_enabled(profile)) {
@@ -674,8 +683,10 @@ static ssize_t profile_assignments_write(struct file *filep,
 	}
 
 	ret = kgsl_active_count_get(device);
-	if (ret)
-		return -EINVAL;
+	if (ret) {
+		size = ret;
+		goto error_unlock;
+	}
 
 	/*
 	 * When adding/removing assignments, ensure that the GPU is done with
@@ -683,18 +694,12 @@ static ssize_t profile_assignments_write(struct file *filep,
 	 * GPU and avoid racey conditions.
 	 */
 	if (adreno_idle(device)) {
-		size = -EINVAL;
+		size = -ETIMEDOUT;
 		goto error_put;
 	}
 
 	/* clear all shared buffer results */
 	adreno_profile_process_results(device);
-
-	buf = kmalloc(len + 1, GFP_KERNEL);
-	if (!buf) {
-		size = -EINVAL;
-		goto error_put;
-	}
 
 	pbuf = buf;
 
@@ -704,19 +709,15 @@ static ssize_t profile_assignments_write(struct file *filep,
 		profile->log_tail = profile->log_buffer;
 	}
 
-	if (copy_from_user(buf, user_buf, len)) {
-		size = -EFAULT;
-		goto error_free;
-	}
 
 	/* for sanity and parsing, ensure it is null terminated */
 	buf[len] = '\0';
 
 	/* parse file buf and add(remove) to(from) appropriate lists */
-	while (1) {
+	while (pbuf) {
 		pbuf = _parse_next_assignment(adreno_dev, pbuf, &groupid,
 				&countable, &remove_assignment);
-		if (pbuf == NULL)
+		if (groupid < 0 || countable < 0)
 			break;
 
 		if (remove_assignment)
@@ -727,12 +728,12 @@ static ssize_t profile_assignments_write(struct file *filep,
 
 	size = len;
 
-error_free:
-	kfree(buf);
 error_put:
 	kgsl_active_count_put(device);
 error_unlock:
 	kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
+error_free:
+	kfree(buf);
 	return size;
 }
 
@@ -1013,11 +1014,12 @@ void adreno_profile_init(struct kgsl_device *device)
 
 	/* allocate shared_buffer, which includes pre_ib and post_ib */
 	profile->shared_size = ADRENO_PROFILE_SHARED_BUF_SIZE_DWORDS;
-	ret = kgsl_allocate_contiguous(device, &profile->shared_buffer,
-			profile->shared_size * sizeof(unsigned int));
+	ret = kgsl_allocate_global(device, &profile->shared_buffer,
+			profile->shared_size * sizeof(unsigned int), 0);
+
 	if (ret) {
-		profile->shared_buffer.hostptr = NULL;
 		profile->shared_size = 0;
+		return;
 	}
 
 	INIT_LIST_HEAD(&profile->assignments_list);
@@ -1050,8 +1052,7 @@ void adreno_profile_close(struct kgsl_device *device)
 	profile->log_tail = NULL;
 	profile->shared_head = 0;
 	profile->shared_tail = 0;
-	kgsl_sharedmem_free(&profile->shared_buffer);
-	profile->shared_buffer.hostptr = NULL;
+	kgsl_free_global(&profile->shared_buffer);
 	profile->shared_size = 0;
 
 	profile->assignment_count = 0;

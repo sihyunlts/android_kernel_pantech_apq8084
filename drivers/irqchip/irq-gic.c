@@ -2,6 +2,7 @@
  *  linux/arch/arm/common/gic.c
  *
  *  Copyright (C) 2002 ARM Limited, All Rights Reserved.
+ *  Copyright (c) 2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -208,6 +209,9 @@ static void gic_unmask_irq(struct irq_data *d)
 
 static void gic_disable_irq(struct irq_data *d)
 {
+	/* don't lazy-disable PPIs */
+	if (gic_irq(d) < 32)
+		gic_mask_irq(d);
 	if (gic_arch_extn.irq_disable)
 		gic_arch_extn.irq_disable(d);
 }
@@ -240,6 +244,31 @@ static int gic_suspend(void)
 }
 
 extern int msm_show_resume_irq_mask;
+
+/*
+ * gic_show_pending_irq - Shows the pending interrupts
+ * Note: Interrupts should be disabled on the cpu from which
+ * this is called to get accurate list of pending interrupts.
+ */
+void gic_show_pending_irq(void)
+{
+	void __iomem *base;
+	unsigned long pending[32];
+	u32 enabled;
+	unsigned int i, j;
+
+	for (i = 0; i < MAX_GIC_NR; i++) {
+		base = gic_data_dist_base(&gic_data[i]);
+		for (j = 0; j * 32 < gic_data[i].gic_irqs; j++) {
+			enabled = readl_relaxed(base +
+						GIC_DIST_ENABLE_SET + j * 4);
+			pending[j] = readl_relaxed(base +
+						GIC_DIST_PENDING_SET + j * 4);
+			pending[j] &= enabled;
+			pr_err("Pending irqs[%d] %lx\n", j, pending[j]);
+		}
+	}
+}
 
 static void gic_show_resume_irq(struct gic_chip_data *gic)
 {
@@ -764,11 +793,6 @@ static void gic_cpu_restore(unsigned int gic_nr)
 	if (!dist_base || !cpu_base)
 		return;
 
-	ptr = __this_cpu_ptr(gic_data[gic_nr].saved_ppi_enable);
-	for (i = 0; i < DIV_ROUND_UP(32, 32); i++)
-		writel_relaxed_no_log(ptr[i], dist_base +
-			GIC_DIST_ENABLE_SET + i * 4);
-
 	ptr = __this_cpu_ptr(gic_data[gic_nr].saved_ppi_conf);
 	for (i = 0; i < DIV_ROUND_UP(32, 16); i++)
 		writel_relaxed_no_log(ptr[i], dist_base +
@@ -777,6 +801,11 @@ static void gic_cpu_restore(unsigned int gic_nr)
 	for (i = 0; i < DIV_ROUND_UP(32, 4); i++)
 		writel_relaxed_no_log(gic_data[gic_nr].saved_dist_pri[i],
 			dist_base + GIC_DIST_PRI + i * 4);
+
+	ptr = __this_cpu_ptr(gic_data[gic_nr].saved_ppi_enable);
+	for (i = 0; i < DIV_ROUND_UP(32, 32); i++)
+		writel_relaxed_no_log(ptr[i], dist_base +
+			GIC_DIST_ENABLE_SET + i * 4);
 
 	writel_relaxed_no_log(0xf0, cpu_base + GIC_CPU_PRIMASK);
 	writel_relaxed_no_log(saved_cpu_ctrl, cpu_base + GIC_CPU_CTRL);

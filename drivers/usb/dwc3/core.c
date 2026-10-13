@@ -596,6 +596,8 @@ static int dwc3_probe(struct platform_device *pdev)
 
 	dwc->core_reset_after_phy_init =
 		of_property_read_bool(node, "core_reset_after_phy_init");
+	dwc->usb3_u1u2_disable = of_property_read_bool(node,
+		"snps,usb3-u1u2-disable");
 
 	dwc->needs_fifo_resize = of_property_read_bool(node, "tx-fifo-resize");
 	host_only_mode = of_property_read_bool(node, "host-only-mode");
@@ -629,7 +631,7 @@ static int dwc3_probe(struct platform_device *pdev)
 	}
 
 	if (IS_ERR(dwc->usb3_phy)) {
-		ret = PTR_ERR(dwc->usb2_phy);
+		ret = PTR_ERR(dwc->usb3_phy);
 
 		/*
 		 * if -ENXIO is returned, it means PHY layer wasn't

@@ -143,6 +143,7 @@ static bool voice_is_valid_session_id(uint32_t session_id)
 	case VOLTE_SESSION_VSID:
 	case VOIP_SESSION_VSID:
 	case QCHAT_SESSION_VSID:
+	case VOWLAN_SESSION_VSID:
 	case ALL_SESSION_VSID:
 		ret = true;
 		break;
@@ -236,6 +237,9 @@ char *voc_get_session_name(u32 session_id)
 	} else if (session_id ==
 			common.voice[VOC_PATH_QCHAT_PASSIVE].session_id) {
 		session_name = QCHAT_SESSION_NAME;
+	} else if (session_id ==
+			common.voice[VOC_PATH_VOWLAN_PASSIVE].session_id) {
+		session_name = VOWLAN_SESSION_NAME;
 	} else if (session_id == common.voice[VOC_PATH_FULL].session_id) {
 		session_name = VOIP_SESSION_NAME;
 	}
@@ -258,6 +262,9 @@ uint32_t voc_get_session_id(char *name)
 		else if (!strncmp(name, "QCHAT session", 13))
 			session_id =
 			common.voice[VOC_PATH_QCHAT_PASSIVE].session_id;
+		else if (!strncmp(name, "VoWLAN session", 14))
+			session_id =
+			common.voice[VOC_PATH_VOWLAN_PASSIVE].session_id;
 		else
 			session_id = common.voice[VOC_PATH_FULL].session_id;
 
@@ -291,6 +298,10 @@ static struct voice_data *voice_get_session(u32 session_id)
 
 	case QCHAT_SESSION_VSID:
 		v = &common.voice[VOC_PATH_QCHAT_PASSIVE];
+		break;
+
+	case VOWLAN_SESSION_VSID:
+		v = &common.voice[VOC_PATH_VOWLAN_PASSIVE];
 		break;
 
 	case ALL_SESSION_VSID:
@@ -331,6 +342,10 @@ int voice_get_idx_for_session(u32 session_id)
 
 	case QCHAT_SESSION_VSID:
 		idx = VOC_PATH_QCHAT_PASSIVE;
+		break;
+
+	case VOWLAN_SESSION_VSID:
+		idx = VOC_PATH_VOWLAN_PASSIVE;
 		break;
 
 	case ALL_SESSION_VSID:
@@ -375,6 +390,11 @@ static bool is_voice2_session(u32 session_id)
 static bool is_qchat_session(u32 session_id)
 {
 	return (session_id == common.voice[VOC_PATH_QCHAT_PASSIVE].session_id);
+}
+
+static bool is_vowlan_session(u32 session_id)
+{
+	return (session_id == common.voice[VOC_PATH_VOWLAN_PASSIVE].session_id);
 }
 
 static bool is_voc_state_active(int voc_state)
@@ -435,6 +455,7 @@ static void init_session_id(void)
 	common.voice[VOC_PATH_VOICE2_PASSIVE].session_id = VOICE2_SESSION_VSID;
 	common.voice[VOC_PATH_FULL].session_id = VOIP_SESSION_VSID;
 	common.voice[VOC_PATH_QCHAT_PASSIVE].session_id = QCHAT_SESSION_VSID;
+	common.voice[VOC_PATH_VOWLAN_PASSIVE].session_id = VOWLAN_SESSION_VSID;
 }
 
 static int voice_apr_register(uint32_t session_id)
@@ -641,6 +662,8 @@ static int voice_create_mvm_cvs_session(struct voice_data *v)
 	/* send cmd to create mvm session and wait for response */
 
 	if (!mvm_handle) {
+		memset(mvm_session_cmd.mvm_session.name, 0,
+			sizeof(mvm_session_cmd.mvm_session.name));
 		if (!is_voip_session(v->session_id)) {
 			mvm_session_cmd.hdr.hdr_field = APR_HDR_FIELD(
 						APR_MSG_TYPE_SEQ_CMD,
@@ -661,19 +684,23 @@ static int voice_create_mvm_cvs_session(struct voice_data *v)
 			if (is_volte_session(v->session_id)) {
 				strlcpy(mvm_session_cmd.mvm_session.name,
 				"default volte voice",
-				sizeof(mvm_session_cmd.mvm_session.name));
+				strlen("default volte voice")+1);
 			} else if (is_voice2_session(v->session_id)) {
 				strlcpy(mvm_session_cmd.mvm_session.name,
 				VOICE2_SESSION_VSID_STR,
-				sizeof(mvm_session_cmd.mvm_session.name));
+				strlen(VOICE2_SESSION_VSID_STR)+1);
 			} else if (is_qchat_session(v->session_id)) {
 				strlcpy(mvm_session_cmd.mvm_session.name,
 				QCHAT_SESSION_VSID_STR,
-				sizeof(mvm_session_cmd.mvm_session.name));
+				strlen(QCHAT_SESSION_VSID_STR)+1);
+			} else if (is_vowlan_session(v->session_id)) {
+				strlcpy(mvm_session_cmd.mvm_session.name,
+				VOWLAN_SESSION_VSID_STR,
+				strlen(VOWLAN_SESSION_VSID_STR)+1);
 			} else {
 				strlcpy(mvm_session_cmd.mvm_session.name,
 				"default modem voice",
-				sizeof(mvm_session_cmd.mvm_session.name));
+				strlen("default modem voice")+1);
 			}
 
 			v->mvm_state = CMD_STATUS_FAIL;
@@ -709,7 +736,7 @@ static int voice_create_mvm_cvs_session(struct voice_data *v)
 				VSS_IMVM_CMD_CREATE_FULL_CONTROL_SESSION;
 			strlcpy(mvm_session_cmd.mvm_session.name,
 				"default voip",
-				sizeof(mvm_session_cmd.mvm_session.name));
+				strlen("default voip")+1);
 
 			v->mvm_state = CMD_STATUS_FAIL;
 
@@ -732,6 +759,8 @@ static int voice_create_mvm_cvs_session(struct voice_data *v)
 	}
 	/* send cmd to create cvs session */
 	if (!cvs_handle) {
+		memset(cvs_session_cmd.cvs_session.name, 0,
+			sizeof(cvs_session_cmd.cvs_session.name));
 		if (!is_voip_session(v->session_id)) {
 			pr_debug("%s: creating CVS passive session\n",
 				 __func__);
@@ -753,19 +782,23 @@ static int voice_create_mvm_cvs_session(struct voice_data *v)
 			if (is_volte_session(v->session_id)) {
 				strlcpy(cvs_session_cmd.cvs_session.name,
 				"default volte voice",
-				sizeof(cvs_session_cmd.cvs_session.name));
+				strlen("default volte voice")+1);
 			} else if (is_voice2_session(v->session_id)) {
 				strlcpy(cvs_session_cmd.cvs_session.name,
 				VOICE2_SESSION_VSID_STR,
-				sizeof(cvs_session_cmd.cvs_session.name));
+				strlen(VOICE2_SESSION_VSID_STR)+1);
 			} else if (is_qchat_session(v->session_id)) {
 				strlcpy(cvs_session_cmd.cvs_session.name,
 				QCHAT_SESSION_VSID_STR,
-				sizeof(cvs_session_cmd.cvs_session.name));
+				strlen(QCHAT_SESSION_VSID_STR)+1);
+			} else if (is_vowlan_session(v->session_id)) {
+				strlcpy(cvs_session_cmd.cvs_session.name,
+				VOWLAN_SESSION_VSID_STR,
+				strlen(VOWLAN_SESSION_VSID_STR)+1);
 			} else {
 			strlcpy(cvs_session_cmd.cvs_session.name,
 				"default modem voice",
-				sizeof(cvs_session_cmd.cvs_session.name));
+				strlen("default modem voice")+1);
 			}
 			v->cvs_state = CMD_STATUS_FAIL;
 
@@ -813,7 +846,7 @@ static int voice_create_mvm_cvs_session(struct voice_data *v)
 					       common.mvs_info.network_type;
 			strlcpy(cvs_full_ctl_cmd.cvs_session.name,
 				"default q6 voice",
-				sizeof(cvs_full_ctl_cmd.cvs_session.name));
+				strlen("default q6 voice")+1);
 
 			v->cvs_state = CMD_STATUS_FAIL;
 
@@ -953,6 +986,7 @@ static int voice_destroy_mvm_cvs_session(struct voice_data *v)
 	if (is_voip_session(v->session_id) ||
 	    is_qchat_session(v->session_id) ||
 	    is_volte_session(v->session_id) ||
+	    is_vowlan_session(v->session_id) ||
 	    v->voc_state == VOC_ERROR) {
 		/* Destroy CVS. */
 		pr_debug("%s: CVS destroy session\n", __func__);
@@ -4642,7 +4676,8 @@ int voc_set_pp_enable(uint32_t session_id, uint32_t module_id, uint32_t enable)
 	while (voice_itr_get_next_session(&itr, &v)) {
 		if (v != NULL) {
 			if (!(is_voice_app_id(v->session_id) ||
-			      is_volte_session(v->session_id)))
+			      is_volte_session(v->session_id) ||
+			      is_vowlan_session(v->session_id)))
 				continue;
 
 			mutex_lock(&v->lock);

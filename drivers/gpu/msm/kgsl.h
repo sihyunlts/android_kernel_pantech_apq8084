@@ -116,7 +116,7 @@ struct kgsl_memdesc;
 struct kgsl_cmdbatch;
 
 struct kgsl_memdesc_ops {
-	int (*vmflags)(struct kgsl_memdesc *);
+	unsigned int vmflags;
 	int (*vmfault)(struct kgsl_memdesc *, struct vm_area_struct *,
 		       struct vm_fault *);
 	void (*free)(struct kgsl_memdesc *memdesc);
@@ -132,6 +132,10 @@ struct kgsl_memdesc_ops {
 #define KGSL_MEMDESC_FROZEN BIT(2)
 /* The memdesc is mapped into a pagetable */
 #define KGSL_MEMDESC_MAPPED BIT(3)
+/* Indicates gpuaddr is assigned via gen pool */
+#define KGSL_MEMDESC_GENPOOL_ALLOC BIT(4)
+/* Indicates gpuaddr is assigned via bimap */
+#define KGSL_MEMDESC_BITMAP_ALLOC BIT(6)
 
 /* shared memory allocation */
 struct kgsl_memdesc {

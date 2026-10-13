@@ -4144,6 +4144,9 @@ struct asm_stream_cmd_open_write_v3 {
 /* Absolute timestamp is identified by this value.*/
 #define ASM_ABSOLUTEIMESTAMP      1
 
+/* Bit value for Low Latency Tx stream subfield */
+#define ASM_LOW_LATENCY_TX_STREAM_SESSION			1
+
 /* Bit shift for the stream_perf_mode subfield. */
 #define ASM_SHIFT_STREAM_PERF_MODE_FLAG_IN_OPEN_READ              29
 
@@ -7469,4 +7472,22 @@ enum {
 	COMPRESSED_PASSTHROUGH,
 	COMPRESSED_PASSTHROUGH_CONVERT,
 };
+
+#define AUDPROC_MODULE_ID_COMPRESSED_MUTE                0x00010770
+#define AUDPROC_PARAM_ID_COMPRESSED_MUTE                 0x00010771
+
+struct adm_set_compressed_device_mute {
+	struct adm_cmd_set_pp_params_v5 command;
+	struct adm_param_data_v5 params;
+	u32    mute_on;
+} __packed;
+
+#define AUDPROC_MODULE_ID_COMPRESSED_LATENCY             0x0001076E
+#define AUDPROC_PARAM_ID_COMPRESSED_LATENCY              0x0001076F
+
+struct adm_set_compressed_device_latency {
+	struct adm_cmd_set_pp_params_v5 command;
+	struct adm_param_data_v5 params;
+	u32    latency;
+} __packed;
 #endif /*_APR_AUDIO_V2_H_ */

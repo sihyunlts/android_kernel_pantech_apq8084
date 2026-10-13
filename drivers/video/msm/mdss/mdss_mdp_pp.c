@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -85,6 +85,8 @@ struct mdp_csc_cfg mdp_csc_convert[MDSS_MDP_MAX_CSC] = {
 #define HIST_V2_INTR_BIT_MASK		0xF33000
 #define HIST_V1_INTR_BIT_MASK		0X333333
 #define HIST_WAIT_TIMEOUT(frame) ((75 * HZ * (frame)) / 1000)
+#define HIST_KICKOFF_WAIT_FRACTION 4
+
 /* hist collect state */
 enum {
 	HIST_UNKNOWN,
@@ -874,19 +876,18 @@ static int pp_vig_pipe_setup(struct mdss_mdp_pipe *pipe, u32 *op)
 			 * TODO: Allow pipe to be programmed whenever new CSC is
 			 * applied (i.e. dirty bit)
 			 */
-			if (pipe->play_cnt == 0)
-				mdss_mdp_csc_setup_data(MDSS_MDP_BLOCK_SSPP,
-				  pipe->num, 1, &pipe->pp_cfg.csc_cfg);
+			mdss_mdp_csc_setup_data(MDSS_MDP_BLOCK_SSPP, pipe->num,
+					1, &pipe->pp_cfg.csc_cfg);
 	} else {
-		if (pipe->src_fmt->is_yuv)
+		if (pipe->src_fmt->is_yuv) {
 			opmode |= (0 << 19) |	/* DST_DATA=RGB */
 				  (1 << 18) |	/* SRC_DATA=YCBCR */
 				  (1 << 17);	/* CSC_1_EN */
-		/*
-		 * TODO: Needs to be part of dirty bit logic: if there is a
-		 * previously configured pipe need to re-configure CSC matrix
-		 */
-		if (pipe->play_cnt == 0) {
+			/*
+			 * TODO: Needs to be part of dirty bit logic: if there
+			 * is a previously configured pipe need to re-configure
+			 * CSC matrix
+			 */
 			mdss_mdp_csc_setup(MDSS_MDP_BLOCK_SSPP, pipe->num, 1,
 					   MDSS_MDP_CSC_YUV2RGB);
 		}
@@ -1043,6 +1044,7 @@ static int mdss_mdp_scale_setup(struct mdss_mdp_pipe *pipe)
 	struct mdss_data_type *mdata;
 	u32 src_w, src_h;
 	u32 dcm_state = DCM_UNINIT;
+	u32 chroma_shift_x = 0, chroma_shift_y = 0;
 
 	pr_debug("pipe=%d, change pxl ext=%d\n", pipe->num,
 			pipe->scale.enable_pxl_ext);
@@ -1101,10 +1103,11 @@ static int mdss_mdp_scale_setup(struct mdss_mdp_pipe *pipe)
 	}
 
 	if ((src_h != pipe->dst.h) ||
-	    (pipe->pp_res.pp_sts.sharp_sts & PP_STS_ENABLE) ||
+	    (pipe->src_fmt->is_yuv &&
+			(pipe->pp_res.pp_sts.sharp_sts & PP_STS_ENABLE)) ||
 	    (chroma_sample == MDSS_MDP_CHROMA_420) ||
 	    (chroma_sample == MDSS_MDP_CHROMA_H1V2) ||
-	    pipe->scale.enable_pxl_ext) {
+	    (pipe->scale.enable_pxl_ext && (src_h != pipe->dst.h))) {
 		pr_debug("scale y - src_h=%d dst_h=%d\n", src_h, pipe->dst.h);
 
 		if ((src_h / MAX_DOWNSCALE_RATIO) > pipe->dst.h) {
@@ -1118,11 +1121,10 @@ static int mdss_mdp_scale_setup(struct mdss_mdp_pipe *pipe)
 		init_phasey = pipe->scale.init_phase_y[0];
 
 		if (pipe->type == MDSS_MDP_PIPE_TYPE_VIG) {
-			u32 chroma_shift = 0;
 			if (!pipe->vert_deci &&
 			    ((chroma_sample == MDSS_MDP_CHROMA_420) ||
 			    (chroma_sample == MDSS_MDP_CHROMA_H1V2)))
-				chroma_shift = 1; /* 2x upsample chroma */
+				chroma_shift_y = 1; /* 2x upsample chroma */
 
 			if (src_h <= pipe->dst.h)
 				scale_config |= /* G/Y, A */
@@ -1133,7 +1135,7 @@ static int mdss_mdp_scale_setup(struct mdss_mdp_pipe *pipe)
 					(MDSS_MDP_SCALE_FILTER_PCMN << 10) |
 					(MDSS_MDP_SCALE_FILTER_PCMN << 18);
 
-			if ((src_h >> chroma_shift) <= pipe->dst.h)
+			if ((src_h >> chroma_shift_y) <= pipe->dst.h)
 				scale_config |= /* CrCb */
 					(MDSS_MDP_SCALE_FILTER_BIL << 14);
 			else
@@ -1142,7 +1144,8 @@ static int mdss_mdp_scale_setup(struct mdss_mdp_pipe *pipe)
 
 			writel_relaxed(init_phasey, pipe->base +
 				MDSS_MDP_REG_VIG_QSEED2_C12_INIT_PHASEY);
-			writel_relaxed(phasey_step >> chroma_shift, pipe->base +
+			writel_relaxed(phasey_step >> chroma_shift_y,
+				pipe->base +
 				MDSS_MDP_REG_VIG_QSEED2_C12_PHASESTEPY);
 		} else {
 			if (src_h <= pipe->dst.h)
@@ -1157,10 +1160,11 @@ static int mdss_mdp_scale_setup(struct mdss_mdp_pipe *pipe)
 	}
 
 	if ((src_w != pipe->dst.w) ||
-	    (pipe->pp_res.pp_sts.sharp_sts & PP_STS_ENABLE) ||
+	    (pipe->src_fmt->is_yuv &&
+			(pipe->pp_res.pp_sts.sharp_sts & PP_STS_ENABLE)) ||
 	    (chroma_sample == MDSS_MDP_CHROMA_420) ||
 	    (chroma_sample == MDSS_MDP_CHROMA_H2V1) ||
-	    pipe->scale.enable_pxl_ext) {
+	    (pipe->scale.enable_pxl_ext && (src_w != pipe->dst.w))) {
 		pr_debug("scale x - src_w=%d dst_w=%d\n", src_w, pipe->dst.w);
 
 		if ((src_w / MAX_DOWNSCALE_RATIO) > pipe->dst.w) {
@@ -1174,12 +1178,10 @@ static int mdss_mdp_scale_setup(struct mdss_mdp_pipe *pipe)
 		phasex_step = pipe->scale.phase_step_x[0];
 
 		if (pipe->type == MDSS_MDP_PIPE_TYPE_VIG) {
-			u32 chroma_shift = 0;
-
 			if (!pipe->horz_deci &&
 			    ((chroma_sample == MDSS_MDP_CHROMA_420) ||
 			    (chroma_sample == MDSS_MDP_CHROMA_H2V1)))
-				chroma_shift = 1; /* 2x upsample chroma */
+				chroma_shift_x = 1; /* 2x upsample chroma */
 
 			if (src_w <= pipe->dst.w)
 				scale_config |= /* G/Y, A */
@@ -1190,7 +1192,7 @@ static int mdss_mdp_scale_setup(struct mdss_mdp_pipe *pipe)
 					(MDSS_MDP_SCALE_FILTER_PCMN << 8) |
 					(MDSS_MDP_SCALE_FILTER_PCMN << 16);
 
-			if ((src_w >> chroma_shift) <= pipe->dst.w)
+			if ((src_w >> chroma_shift_x) <= pipe->dst.w)
 				scale_config |= /* CrCb */
 					(MDSS_MDP_SCALE_FILTER_BIL << 12);
 			else
@@ -1199,7 +1201,8 @@ static int mdss_mdp_scale_setup(struct mdss_mdp_pipe *pipe)
 
 			writel_relaxed(init_phasex, pipe->base +
 				MDSS_MDP_REG_VIG_QSEED2_C12_INIT_PHASEX);
-			writel_relaxed(phasex_step >> chroma_shift, pipe->base +
+			writel_relaxed(phasex_step >> chroma_shift_x,
+				pipe->base +
 				MDSS_MDP_REG_VIG_QSEED2_C12_PHASESTEPX);
 		} else {
 			if (src_w <= pipe->dst.w)
@@ -1259,10 +1262,48 @@ static int mdss_mdp_scale_setup(struct mdss_mdp_pipe *pipe)
 		/*program pixel extn values for the SSPP*/
 		mdss_mdp_pipe_program_pixel_extn(pipe);
 	} else {
-		writel_relaxed(phasex_step, pipe->base +
-		   MDSS_MDP_REG_SCALE_PHASE_STEP_X);
-		writel_relaxed(phasey_step, pipe->base +
-		   MDSS_MDP_REG_SCALE_PHASE_STEP_Y);
+		if (pipe->type == MDSS_MDP_PIPE_TYPE_VIG) {
+			/*program x,y initial phase and phase step*/
+			writel_relaxed(0,
+				pipe->base +
+				MDSS_MDP_REG_VIG_QSEED2_C03_INIT_PHASEX);
+			writel_relaxed(init_phasex,
+				pipe->base +
+				MDSS_MDP_REG_VIG_QSEED2_C12_INIT_PHASEX);
+			writel_relaxed(phasex_step,
+				pipe->base +
+				MDSS_MDP_REG_VIG_QSEED2_C03_PHASESTEPX);
+			writel_relaxed(phasex_step >> chroma_shift_x,
+				pipe->base +
+				MDSS_MDP_REG_VIG_QSEED2_C12_PHASESTEPX);
+
+			writel_relaxed(0,
+				pipe->base +
+				MDSS_MDP_REG_VIG_QSEED2_C03_INIT_PHASEY);
+			writel_relaxed(init_phasey,
+				pipe->base +
+				MDSS_MDP_REG_VIG_QSEED2_C12_INIT_PHASEY);
+			writel_relaxed(phasey_step,
+				pipe->base +
+				MDSS_MDP_REG_VIG_QSEED2_C03_PHASESTEPY);
+			writel_relaxed(phasey_step >> chroma_shift_y,
+				pipe->base +
+				MDSS_MDP_REG_VIG_QSEED2_C12_PHASESTEPY);
+		} else {
+
+			writel_relaxed(phasex_step,
+				pipe->base +
+				MDSS_MDP_REG_SCALE_PHASE_STEP_X);
+			writel_relaxed(phasey_step,
+				pipe->base +
+				MDSS_MDP_REG_SCALE_PHASE_STEP_Y);
+			writel_relaxed(0,
+				pipe->base +
+				MDSS_MDP_REG_SCALE_INIT_PHASE_X);
+			writel_relaxed(0,
+				pipe->base +
+				MDSS_MDP_REG_SCALE_INIT_PHASE_Y);
+		}
 	}
 
 	writel_relaxed(scale_config, pipe->base +
@@ -1491,6 +1532,7 @@ static int pp_hist_setup(u32 *op, u32 block, struct mdss_mdp_mixer *mix)
 			if (is_hist_v1)
 				writel_relaxed(1, base + kick_base);
 			hist_info->col_state = HIST_START;
+			complete(&hist_info->first_kick);
 		}
 	}
 	spin_unlock_irqrestore(&hist_info->hist_lock, flag);
@@ -1734,7 +1776,7 @@ int mdss_mdp_pp_setup(struct mdss_mdp_ctl *ctl)
 	/* TODO: have some sort of reader/writer lock to prevent unclocked
 	 * access while display power is toggled */
 	mutex_lock(&ctl->lock);
-	if (!ctl->power_on) {
+	if (!mdss_mdp_ctl_is_power_on(ctl)) {
 		ret = -EPERM;
 		goto error;
 	}
@@ -1962,6 +2004,7 @@ int mdss_mdp_pp_init(struct device *dev)
 						mdss_mdp_get_dspp_addr_off(i) +
 						MDSS_MDP_REG_DSPP_HIST_CTL_BASE;
 					init_completion(&hist[i].comp);
+					init_completion(&hist[i].first_kick);
 				}
 				if (mdata->nmixers_intf == 4)
 					hist[3].intr_shift = 22;
@@ -1979,6 +2022,7 @@ int mdss_mdp_pp_init(struct device *dev)
 			vig[i].pp_res.hist.base = vig[i].base +
 				MDSS_MDP_REG_VIG_HIST_CTL_BASE;
 			init_completion(&vig[i].pp_res.hist.comp);
+			init_completion(&vig[i].pp_res.hist.first_kick);
 		}
 		if (!mdata->pp_bus_hdl) {
 			pp_bus_pdata = &mdp_pp_bus_scale_table;
@@ -3152,6 +3196,7 @@ static int pp_hist_enable(struct pp_hist_col_info *hist_info,
 	spin_unlock_irqrestore(&hist_info->hist_lock, flag);
 	hist_info->frame_cnt = req->frame_cnt;
 	INIT_COMPLETION(hist_info->comp);
+	INIT_COMPLETION(hist_info->first_kick);
 	hist_info->hist_cnt_read = 0;
 	hist_info->hist_cnt_sent = 0;
 	hist_info->hist_cnt_time = 0;
@@ -3285,6 +3330,7 @@ static int pp_hist_disable(struct pp_hist_col_info *hist_info)
 	mdss_mdp_hist_intr_req(&mdata->hist_intr,
 				intr_mask << hist_info->intr_shift, false);
 	complete_all(&hist_info->comp);
+	complete_all(&hist_info->first_kick);
 	/* if hist v2, make sure HW is unlocked */
 	if (is_hist_v2)
 		writel_relaxed(0, hist_info->base);
@@ -3519,7 +3565,7 @@ static int pp_hist_collect(struct mdp_histogram_data *hist,
 				struct pp_hist_col_info *hist_info,
 				char __iomem *ctl_base, u32 expect_sum)
 {
-	int wait_ret, ret = 0;
+	int kick_ret, wait_ret, ret = 0;
 	u32 timeout, sum;
 	char __iomem *v_base;
 	unsigned long flag;
@@ -3535,7 +3581,7 @@ static int pp_hist_collect(struct mdp_histogram_data *hist,
 	spin_lock_irqsave(&hist_info->hist_lock, flag);
 	if ((hist_info->col_en == 0) ||
 			(hist_info->col_state == HIST_UNKNOWN)) {
-		ret = -EINVAL;
+		ret = -ENODATA;
 		spin_unlock_irqrestore(&hist_info->hist_lock, flag);
 		goto hist_collect_exit;
 	}
@@ -3550,12 +3596,26 @@ static int pp_hist_collect(struct mdp_histogram_data *hist,
 			pipe = container_of(res, struct mdss_mdp_pipe, pp_res);
 			pipe->params_changed++;
 		}
-		wait_ret = wait_for_completion_killable_timeout(
+		kick_ret = wait_for_completion_killable_timeout(
+				&(hist_info->first_kick), timeout /
+					HIST_KICKOFF_WAIT_FRACTION);
+		if (kick_ret != 0)
+			wait_ret = wait_for_completion_killable_timeout(
 				&(hist_info->comp), timeout);
 
 		mutex_lock(&hist_info->hist_mutex);
 		spin_lock_irqsave(&hist_info->hist_lock, flag);
-		if (wait_ret == 0) {
+		if (kick_ret == 0) {
+			ret = -ENODATA;
+			pr_debug("histogram kickoff not done yet");
+			spin_unlock_irqrestore(&hist_info->hist_lock, flag);
+			goto hist_collect_exit;
+		} else if (kick_ret < 0) {
+			ret = -EINTR;
+			pr_debug("histogram first kickoff interrupted");
+			spin_unlock_irqrestore(&hist_info->hist_lock, flag);
+			goto hist_collect_exit;
+		} else if (wait_ret == 0) {
 			ret = -ETIMEDOUT;
 			pr_debug("bin collection timedout, state %d",
 					hist_info->col_state);
@@ -3984,7 +4044,7 @@ static struct msm_fb_data_type *mdss_get_mfd_from_index(int index)
 
 	for (i = 0; i < mdata->nctl; i++) {
 		ctl = mdata->ctl_off + i;
-		if ((ctl->power_on) && (ctl->mfd)
+		if ((mdss_mdp_ctl_is_power_on(ctl)) && (ctl->mfd)
 				&& (ctl->mfd->index == index))
 			out = ctl->mfd;
 	}
@@ -4864,7 +4924,8 @@ static int  pp_ad_attenuate_bl(u32 bl, u32 *bl_out,
 	}
 
 	ret = mdss_mdp_get_ad(mfd, &ad);
-	if (ret || !ad) {
+	if (ret || !ad || !ad->bl_mfd || !ad->bl_mfd->panel_info ||
+		!ad->bl_mfd->panel_info->bl_max || !ad->bl_att_lut) {
 		pr_err("Failed to get the ad.\n");
 		return ret;
 	}
@@ -4880,7 +4941,7 @@ static int  pp_ad_attenuate_bl(u32 bl, u32 *bl_out,
 		shift++;
 	}
 	n = bl >> shift;
-	if (n >= AD_BL_ATT_LUT_LEN) {
+	if (n >= (AD_BL_ATT_LUT_LEN - 1)) {
 		pr_err("Invalid index for BL attenuation: %d.\n", n);
 		return ret;
 	}

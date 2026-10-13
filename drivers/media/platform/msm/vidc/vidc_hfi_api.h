@@ -44,6 +44,7 @@
 #define HAL_BUFFERFLAG_READONLY         0x00000200
 #define HAL_BUFFERFLAG_ENDOFSUBFRAME    0x00000400
 #define HAL_BUFFERFLAG_EOSEQ            0x00200000
+#define HAL_BUFFERFLAG_MBAFF            0x08000000
 #define HAL_BUFFERFLAG_YUV_601_709_CSC_CLAMP   0x10000000
 #define HAL_BUFFERFLAG_DROP_FRAME       0x20000000
 #define HAL_BUFFERFLAG_TS_DISCONTINUITY	0x40000000
@@ -204,6 +205,7 @@ enum hal_property {
 	HAL_PARAM_VPE_COLOR_SPACE_CONVERSION,
 	HAL_CONFIG_VENC_HIER_P_NUM_FRAMES,
 	HAL_PARAM_VENC_HIER_P_MAX_ENH_LAYERS,
+	HAL_PARAM_VENC_ENABLE_INITIAL_QP,
 };
 
 enum hal_domain {
@@ -640,6 +642,13 @@ struct hal_quantization {
 	u32 qpp;
 	u32 qpb;
 	u32 layer_id;
+};
+
+struct hal_initial_quantization {
+	u32 qpi;
+	u32 qpp;
+	u32 qpb;
+	u32 init_qp_enable;
 };
 
 struct hal_quantization_range {
@@ -1165,6 +1174,7 @@ struct vidc_hal_session_init_done {
 	struct hal_capability_supported scale_y;
 	struct hal_capability_supported bitrate;
 	struct hal_capability_supported hier_p;
+	struct hal_capability_supported ltr_count;
 	struct hal_uncompressed_format_supported uncomp_format;
 	struct hal_interlace_format_supported HAL_format;
 	struct hal_nal_stream_format_supported nal_stream_format;
@@ -1259,9 +1269,6 @@ struct hfi_device {
 	int (*vote_bus)(void *dev, struct vidc_bus_vote_data *data,
 			int num_data);
 	int (*unvote_bus)(void *dev);
-	int (*unset_ocmem)(void *dev);
-	int (*alloc_ocmem)(void *dev, unsigned long size);
-	int (*free_ocmem)(void *dev);
 	int (*iommu_get_domain_partition)(void *dev, u32 flags, u32 buffer_type,
 			int *domain_num, int *partition_num);
 	int (*load_fw)(void *dev);
@@ -1275,6 +1282,7 @@ struct hfi_device {
 	int (*session_clean)(void *sess);
 	int (*get_core_capabilities)(void);
 	int (*power_enable)(void *dev);
+	int (*suspend)(void *dev);
 };
 
 typedef void (*hfi_cmd_response_callback) (enum command_response cmd,

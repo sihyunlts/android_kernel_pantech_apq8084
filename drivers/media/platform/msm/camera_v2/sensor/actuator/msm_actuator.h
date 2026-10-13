@@ -91,8 +91,6 @@ struct msm_actuator_ctrl_t {
 	struct msm_actuator_reg_params_t reg_tbl[MAX_ACTUATOR_REG_TBL_SIZE];
 	uint16_t region_size;
 	void *user_data;
-	uint32_t vcm_pwd;
-	uint32_t vcm_enable;
 	uint32_t total_steps;
 	uint16_t pwd_step;
 	uint16_t initial_code;
@@ -102,7 +100,6 @@ struct msm_actuator_ctrl_t {
 	uint32_t subdev_id;
 	enum msm_actuator_state_t actuator_state;
 	struct msm_actuator_vreg vreg_cfg;
-	uint32_t valid_position;
 	struct park_lens_data_t park_lens;
 	uint32_t max_code_size;
 #ifdef CONFIG_MACH_APQ8084_EF67

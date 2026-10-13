@@ -61,7 +61,14 @@
 #define MAX_DCI_PACKET_SZ		8710
 
 #define DCI_LOCAL_PROC	0
-#define DCI_MDM_PROC	1
+#define DCI_REMOTE_BASE 1
+#define DCI_MDM_PROC	DCI_REMOTE_BASE
+#define DCI_REMOTE_LAST (DCI_REMOTE_BASE + 1)
+#ifndef CONFIG_DIAGFWD_BRIDGE_CODE
+#define NUM_DCI_PROC 1
+#else
+#define NUM_DCI_PROC DCI_REMOTE_LAST
+#endif
 
 #define DCI_BRIDGE_MDM_IDX	1
 #define DCI_HSIC_CH_IDX		0
@@ -251,11 +258,8 @@ uint8_t diag_dci_get_cumulative_real_time(int token);
 int diag_dci_set_real_time(struct diag_dci_client_tbl *entry,
 			   uint8_t real_time);
 int diag_dci_copy_health_stats(struct diag_dci_health_stats_proc *stats_proc);
-/* Functions related to DCI wakeup sources */
-void diag_dci_try_activate_wakeup_source(void);
-void diag_dci_try_deactivate_wakeup_source(void);
 int diag_dci_write_proc(int peripheral, int pkt_type, char *buf, int len);
-
+void dci_drain_data(unsigned long data);
 #ifdef CONFIG_DIAGFWD_BRIDGE_CODE
 int diag_send_dci_log_mask_remote(int token);
 int diag_send_dci_event_mask_remote(int token);

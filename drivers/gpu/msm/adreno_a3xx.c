@@ -245,13 +245,11 @@ int adreno_a3xx_pwron_fixup_init(struct adreno_device *adreno_dev)
 	if (test_bit(ADRENO_DEVICE_PWRON_FIXUP, &adreno_dev->priv))
 		return 0;
 
-	ret = kgsl_allocate_contiguous(&adreno_dev->dev,
-				&adreno_dev->pwron_fixup, PAGE_SIZE);
+	ret = kgsl_allocate_global(&adreno_dev->dev,
+		&adreno_dev->pwron_fixup, PAGE_SIZE, KGSL_MEMFLAGS_GPUREADONLY);
 
 	if (ret)
 		return ret;
-
-	adreno_dev->pwron_fixup.flags |= KGSL_MEMFLAGS_GPUREADONLY;
 
 	cmds = adreno_dev->pwron_fixup.hostptr;
 
@@ -859,7 +857,6 @@ void a3xx_cp_callback(struct adreno_device *adreno_dev, int irq)
 {
 	struct kgsl_device *device = &adreno_dev->dev;
 
-	device->pwrctrl.irq_last = 1;
 	queue_work(device->work_queue, &device->event_work);
 	adreno_dispatcher_schedule(device);
 }

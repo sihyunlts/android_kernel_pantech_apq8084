@@ -1,4 +1,4 @@
-/* Copyright (c) 2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -89,7 +89,7 @@ struct vpu_port_info {
 	struct v4l2_pix_format_mplane format;
 	struct v4l2_rect roi;
 	u32 scan_mode;
-	u32 framerate;
+	u32 framerate; /* in 16.16 format */
 	u32 video_fmt;
 	u32 secure_content;
 
@@ -160,7 +160,7 @@ struct vpu_dev_session {
 	/* controls handler */
 	struct vpu_controller *controller;
 
-	/* load in bits per second (bps)*/
+	/* load in kilo-bits per second (kbps)*/
 	u32 load;
 
 	/* session has dual outputs */

@@ -131,6 +131,9 @@ struct mxhci_hsic_hcd {
 
 	uint32_t		wakeup_int_cnt;
 	uint32_t		pwr_evt_irq_inlpm;
+	struct tasklet_struct	bh;
+	unsigned		handled_event_cnt;
+	unsigned		cpu_yield_cnt;
 };
 
 #define SYNOPSIS_DWC3_VENDOR	0x5533
@@ -161,6 +164,9 @@ module_param_named(ep_addr_rxdbg_mask,
 			dbg_hsic.inep_log_mask, uint, S_IRUGO | S_IWUSR);
 module_param_named(ep_addr_txdbg_mask,
 			dbg_hsic.outep_log_mask, uint, S_IRUGO | S_IWUSR);
+
+static int max_event_to_handle = 20;
+module_param(max_event_to_handle, uint, S_IRUGO | S_IWUSR);
 
 static int mxhci_hsic_data_events_show(struct seq_file *s, void *unused)
 {
@@ -770,6 +776,10 @@ static int mxhci_hsic_bus_suspend(struct usb_hcd *hcd)
 			/*clear STAT bit*/
 			writel_relaxed(stat, MSM_HSIC_PWR_EVENT_IRQ_STAT);
 			mb();
+		} else if (!(readl_relaxed(MSM_HSIC_PORTSC) & PORT_PE)) {
+			xhci_dbg_log_event(&dbg_hsic, NULL,
+				"Port is not enabled", 0);
+			return -EBUSY;
 		} else {
 			panic("IN_L2 power event irq timedout");
 		}
@@ -828,11 +838,20 @@ static int mxhci_hsic_suspend(struct mxhci_hsic_hcd *mxhci)
 	}
 
 	disable_irq(hcd->irq);
+	if (mxhci->bh.state) {
+		xhci_dbg_log_event(&dbg_hsic, NULL,
+			"skip SUSPEND tasklet state",
+			mxhci->bh.state);
+		enable_irq(hcd->irq);
+		return -EBUSY;
+	}
+	disable_irq(mxhci->pwr_event_irq);
 
 	/* make sure we don't race against a remote wakeup */
 	if (test_bit(HCD_FLAG_WAKEUP_PENDING, &hcd->flags) ||
 	    (readl_relaxed(MSM_HSIC_PORTSC) & PORT_PLS_MASK) == XDEV_RESUME) {
 		dev_dbg(mxhci->dev, "wakeup pending, aborting suspend\n");
+		enable_irq(mxhci->pwr_event_irq);
 		enable_irq(hcd->irq);
 		return -EBUSY;
 	}
@@ -862,6 +881,7 @@ static int mxhci_hsic_suspend(struct mxhci_hsic_hcd *mxhci)
 
 	mxhci->in_lpm = 1;
 
+	enable_irq(mxhci->pwr_event_irq);
 	enable_irq(hcd->irq);
 
 	if (mxhci->wakeup_irq) {
@@ -1055,6 +1075,69 @@ unlock:
 		spin_unlock_irqrestore(&xhci->lock, flags);
 }
 
+static irqreturn_t mxhci_irq(struct usb_hcd *hcd)
+{
+	struct mxhci_hsic_hcd *mxhci = hcd_to_hsic(hcd->primary_hcd);
+	struct xhci_hcd *xhci = mxhci->xhci;
+	u32 status;
+	u64 temp_64;
+
+	spin_lock(&xhci->lock);
+	/* Check if the xHC generated the interrupt, or the irq is shared */
+	status = xhci_readl(xhci, &xhci->op_regs->status);
+	if (status == 0xffffffff) {
+		spin_unlock(&xhci->lock);
+		return IRQ_HANDLED;
+	}
+
+	if (!(status & STS_EINT)) {
+		spin_unlock(&xhci->lock);
+		return IRQ_NONE;
+	}
+	if (status & STS_FATAL) {
+		xhci_warn(xhci, "WARNING: Host System Error\n");
+		xhci_halt(xhci);
+		spin_unlock(&xhci->lock);
+		return IRQ_HANDLED;
+	}
+
+	/*
+	 * Clear the op reg interrupt status first,
+	 * so we can receive interrupts from other MSI-X interrupters.
+	 * Write 1 to clear the interrupt status.
+	 */
+	status |= STS_EINT;
+	xhci_writel(xhci, status, &xhci->op_regs->status);
+	/* FIXME when MSI-X is supported and there are multiple vectors */
+	/* Clear the MSI-X event interrupt status */
+
+	if (hcd->irq) {
+		u32 irq_pending;
+		/* Acknowledge the PCI interrupt */
+		irq_pending = xhci_readl(xhci, &xhci->ir_set->irq_pending);
+		irq_pending |= IMAN_IP;
+		xhci_writel(xhci, irq_pending, &xhci->ir_set->irq_pending);
+	}
+
+	if (xhci->xhc_state & XHCI_STATE_DYING) {
+		xhci_dbg(xhci, "xHCI dying, ignoring interrupt.\n");
+		/* Clear the event handler busy flag (RW1C);
+		 * the event ring should be empty.
+		 */
+		temp_64 = xhci_read_64(xhci, &xhci->ir_set->erst_dequeue);
+		xhci_write_64(xhci, temp_64 | ERST_EHB,
+				&xhci->ir_set->erst_dequeue);
+		spin_unlock(&xhci->lock);
+		return IRQ_HANDLED;
+	}
+	spin_unlock(&xhci->lock);
+
+	if (!mxhci->xhci_remove_flag)
+		tasklet_schedule(&mxhci->bh);
+
+	return IRQ_HANDLED;
+}
+
 static struct hc_driver mxhci_hsic_hc_driver = {
 	.description =		"xhci-hcd",
 	.product_desc =		"Qualcomm xHCI Host Controller using HSIC",
@@ -1062,7 +1145,7 @@ static struct hc_driver mxhci_hsic_hc_driver = {
 	/*
 	 * generic hardware linkage
 	 */
-	.irq =			xhci_irq,
+	.irq =			mxhci_irq,
 	.flags =		HCD_MEMORY | HCD_USB3,
 
 	/*
@@ -1109,6 +1192,61 @@ static struct hc_driver mxhci_hsic_hc_driver = {
 	.set_autosuspend_delay = mxhci_hsic_set_autosuspend_delay,
 	.udev_enum_done =	mxhci_hsic_udev_enum_done,
 };
+
+static void mxhci_irq_bh(unsigned long param)
+{
+	struct mxhci_hsic_hcd *mxhci = (struct mxhci_hsic_hcd *)param;
+	struct xhci_hcd *xhci = mxhci->xhci;
+	u64 temp_64;
+	union xhci_trb *event_ring_deq;
+	struct xhci_ring *er;
+	dma_addr_t deq;
+	unsigned long flags;
+	unsigned event_cnt = 0;
+	int schedule_again;
+
+	spin_lock_irqsave(&xhci->lock, flags);
+	event_ring_deq = xhci->event_ring->dequeue;
+
+	do {
+		schedule_again = xhci_handle_event(xhci);
+		event_cnt++;
+	} while (schedule_again && (event_cnt < max_event_to_handle));
+
+	/* check if we have more events to process */
+	er = xhci->event_ring;
+	if (schedule_again && er && er->dequeue &&
+		((le32_to_cpu(er->dequeue->event_cmd.flags) & TRB_CYCLE)
+		== er->cycle_state))
+		schedule_again = 1;
+	else
+		schedule_again = 0;
+
+	temp_64 = xhci_read_64(xhci, &xhci->ir_set->erst_dequeue);
+	/* If necessary, update the HW's version of the event ring deq ptr. */
+	if (event_ring_deq != xhci->event_ring->dequeue) {
+		deq = xhci_trb_virt_to_dma(xhci->event_ring->deq_seg,
+				xhci->event_ring->dequeue);
+		if (deq == 0)
+			xhci_warn(xhci,
+				"WARN wrong SW event ring dequeue ptr.\n");
+		/* Update HC event ring dequeue pointer */
+		temp_64 &= ERST_PTR_MASK;
+		temp_64 |= ((u64) deq & (u64) ~ERST_PTR_MASK);
+	}
+
+	/* Clear the event handler busy flag to get irq ; reloads imod */
+	temp_64 |= ERST_EHB;
+	xhci_write_64(xhci, temp_64, &xhci->ir_set->erst_dequeue);
+	spin_unlock_irqrestore(&xhci->lock, flags);
+
+	mxhci->handled_event_cnt += event_cnt - 1;
+	mxhci->cpu_yield_cnt++;
+
+	if (schedule_again && !mxhci->xhci_remove_flag)
+		tasklet_schedule(&mxhci->bh);
+}
+
 
 static ssize_t config_imod_store(struct device *pdev,
 		struct device_attribute *attr, const char *buff, size_t size)
@@ -1270,6 +1408,8 @@ static int mxhci_hsic_probe(struct platform_device *pdev)
 	mxhci->dev = &pdev->dev;
 	mxhci->xhci_remove_flag = false;
 	mxhci->xhci_shutdown_flag = false;
+	mxhci->bh.func = mxhci_irq_bh;
+	mxhci->bh.data = (unsigned long)mxhci;
 
 	mxhci->strobe = of_get_named_gpio(node, "hsic,strobe-gpio", 0);
 	if (mxhci->strobe < 0) {
@@ -1358,10 +1498,6 @@ static int mxhci_hsic_probe(struct platform_device *pdev)
 		writel_relaxed((reg | GCTL_DSBLCLKGTNG), MSM_HSIC_GCTL);
 	}
 
-	/* enable pwr event irq for LPM_IN_L2_IRQ */
-	writel_relaxed(LPM_IN_L2_IRQ_MASK | LPM_OUT_L2_IRQ_MASK,
-			MSM_HSIC_PWR_EVNT_IRQ_MASK);
-
 	mxhci->wakeup_irq = platform_get_irq_byname(pdev, "wakeup_irq");
 	if (mxhci->wakeup_irq < 0) {
 		mxhci->wakeup_irq = 0;
@@ -1377,6 +1513,14 @@ static int mxhci_hsic_probe(struct platform_device *pdev)
 			goto deinit_vddcx;
 		}
 	}
+
+	/* enable pwr event irq for LPM_IN_L2_IRQ */
+	if (mxhci->wakeup_irq)
+		reg = LPM_IN_L2_IRQ_MASK;
+	else
+		reg = LPM_IN_L2_IRQ_MASK | LPM_OUT_L2_IRQ_MASK;
+
+	writel_relaxed(reg, MSM_HSIC_PWR_EVNT_IRQ_MASK);
 
 	irq_set_status_flags(irq, IRQ_NOAUTOEN);
 	ret = usb_add_hcd(hcd, irq, IRQF_SHARED);
@@ -1537,6 +1681,11 @@ static int mxhci_hsic_remove(struct platform_device *pdev)
 
 	pm_runtime_set_suspended(&pdev->dev);
 
+	tasklet_kill(&mxhci->bh);
+
+	pm_runtime_disable(&hcd->self.root_hub->dev);
+	pm_runtime_barrier(&hcd->self.root_hub->dev);
+
 	usb_remove_hcd(xhci->shared_hcd);
 	usb_put_hcd(xhci->shared_hcd);
 
@@ -1653,12 +1802,37 @@ static int mxhci_hsic_pm_resume(struct device *dev)
 
 	return 0;
 }
+
+static int mxhci_hsic_suspend_late(struct device *dev)
+{
+	struct usb_hcd *hcd = dev_get_drvdata(dev);
+	struct mxhci_hsic_hcd *mxhci = hcd_to_hsic(hcd);
+	int ret;
+
+	dev_dbg(dev, "xhci-msm PM suspend_late\n");
+
+	ret = usb_intf_with_pwr_usage_cnt(hcd);
+	if (ret >= 0) {
+		dev_dbg(dev, "Aborting mxhci_hsic_suspend_late\n");
+		xhci_dbg_log_event(&dbg_hsic, NULL, "intf with usage cnt: ",
+			ret);
+		spin_lock(&mxhci->wakeup_lock);
+		if (!mxhci->pm_usage_cnt) {
+			pm_runtime_get(mxhci->dev);
+			mxhci->pm_usage_cnt = 1;
+		}
+		spin_unlock(&mxhci->wakeup_lock);
+		return -EBUSY;
+	}
+	return 0;
+}
 #endif
 
 static const struct dev_pm_ops xhci_msm_hsic_dev_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(mxhci_hsic_pm_suspend, mxhci_hsic_pm_resume)
 	SET_RUNTIME_PM_OPS(mxhci_hsic_runtime_suspend,
 			mxhci_hsic_runtime_resume, mxhci_hsic_runtime_idle)
+	.suspend_late = mxhci_hsic_suspend_late,
 };
 
 static const struct of_device_id of_mxhci_hsic_matach[] = {

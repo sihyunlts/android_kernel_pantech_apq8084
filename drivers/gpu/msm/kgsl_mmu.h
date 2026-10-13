@@ -19,9 +19,14 @@
  * These defines control the address range for allocations that
  * are mapped into all pagetables.
  */
-#define KGSL_IOMMU_GLOBAL_MEM_BASE	0xf8000000
-#define KGSL_IOMMU_GLOBAL_MEM_SIZE	SZ_4M
+#define KGSL_GLOBAL_PT_SIZE	SZ_4M
+#define KGSL_MMU_GLOBAL_MEM_BASE	0xf8000000
 
+/* Virtual memory range to map non-kgsl allocations */
+#define KGSL_MMU_MAPPED_MEM_BASE	TASK_SIZE
+#define KGSL_MMU_MAPPED_MEM_SIZE	(KGSL_MMU_GLOBAL_MEM_BASE -	\
+					KGSL_MMU_MAPPED_MEM_BASE -	\
+					SZ_1M)
 /* defconfig option for disabling per process pagetables */
 #ifdef CONFIG_KGSL_PER_PROCESS_PAGE_TABLE
 #define KGSL_MMU_USE_PER_PROCESS_PT true
@@ -51,7 +56,6 @@ struct kgsl_pagetable {
 	spinlock_t lock;
 	struct kref refcount;
 	struct gen_pool *pool;
-	struct gen_pool *kgsl_pool;
 	struct list_head list;
 	unsigned int name;
 	struct kobject *kobj;
@@ -66,6 +70,7 @@ struct kgsl_pagetable {
 	unsigned int fault_addr;
 	void *priv;
 	struct kgsl_mmu *mmu;
+	unsigned long *mem_bitmap;
 };
 
 struct kgsl_mmu;
@@ -86,11 +91,11 @@ struct kgsl_mmu_ops {
 			(struct kgsl_mmu *mmu);
 	void (*mmu_disable_clk_on_ts)
 		(struct kgsl_mmu *mmu,
-		uint32_t ts, int ctx_id);
-	int (*mmu_enable_clk)
-		(struct kgsl_mmu *mmu, int ctx_id);
+		uint32_t ts, int unit);
+	void (*mmu_enable_clk)
+		(struct kgsl_mmu *mmu, int unit);
 	void (*mmu_disable_clk)
-		(struct kgsl_mmu *mmu, int ctx_id);
+		(struct kgsl_mmu *mmu, int unit);
 	uint64_t (*mmu_get_default_ttbr0)(struct kgsl_mmu *mmu,
 				unsigned int unit_id,
 				enum kgsl_iommu_context_id ctx_id);
@@ -105,10 +110,6 @@ struct kgsl_mmu_ops {
 			phys_addr_t pt_base);
 	phys_addr_t (*mmu_get_pt_base_addr)
 			(struct kgsl_mmu *mmu,
-			struct kgsl_pagetable *pt);
-	int (*mmu_setup_pt) (struct kgsl_mmu *mmu,
-			struct kgsl_pagetable *pt);
-	void (*mmu_cleanup_pt) (struct kgsl_mmu *mmu,
 			struct kgsl_pagetable *pt);
 	unsigned int (*mmu_sync_lock)
 			(struct kgsl_mmu *mmu, unsigned int *cmds);
@@ -183,6 +184,13 @@ void kgsl_mmu_set_mmutype(char *mmutype);
 enum kgsl_mmutype kgsl_mmu_get_mmutype(void);
 int kgsl_mmu_gpuaddr_in_range(struct kgsl_pagetable *pt, unsigned int gpuaddr);
 
+int kgsl_add_global_pt_entry(struct kgsl_device *device,
+	struct kgsl_memdesc *memdesc);
+void kgsl_remove_global_pt_entry(struct kgsl_memdesc *memdesc);
+
+struct kgsl_memdesc *kgsl_search_global_pt_entries(unsigned int gpuaddr,
+		unsigned int size);
+
 /*
  * Static inline functions of MMU that simply call the SMMU specific
  * function using a function pointer. These functions can be thought
@@ -252,27 +260,25 @@ static inline phys_addr_t kgsl_mmu_get_default_ttbr0(struct kgsl_mmu *mmu,
 		return 0;
 }
 
-static inline int kgsl_mmu_enable_clk(struct kgsl_mmu *mmu,
-					int ctx_id)
+static inline void kgsl_mmu_enable_clk(struct kgsl_mmu *mmu, int unit)
 {
 	if (mmu->mmu_ops && mmu->mmu_ops->mmu_enable_clk)
-		return mmu->mmu_ops->mmu_enable_clk(mmu, ctx_id);
+		mmu->mmu_ops->mmu_enable_clk(mmu, unit);
 	else
-		return 0;
+		return;
 }
 
-static inline void kgsl_mmu_disable_clk(struct kgsl_mmu *mmu, int ctx_id)
+static inline void kgsl_mmu_disable_clk(struct kgsl_mmu *mmu, int unit)
 {
 	if (mmu->mmu_ops && mmu->mmu_ops->mmu_disable_clk)
-		mmu->mmu_ops->mmu_disable_clk(mmu, ctx_id);
+		mmu->mmu_ops->mmu_disable_clk(mmu, unit);
 }
 
 static inline void kgsl_mmu_disable_clk_on_ts(struct kgsl_mmu *mmu,
-						unsigned int ts,
-						int ctx_id)
+						unsigned int ts, int unit)
 {
 	if (mmu->mmu_ops && mmu->mmu_ops->mmu_disable_clk_on_ts)
-		mmu->mmu_ops->mmu_disable_clk_on_ts(mmu, ts, ctx_id);
+		mmu->mmu_ops->mmu_disable_clk_on_ts(mmu, ts, unit);
 }
 
 static inline unsigned int kgsl_mmu_get_reg_gpuaddr(struct kgsl_mmu *mmu,
@@ -356,31 +362,6 @@ static inline int kgsl_mmu_is_perprocess(struct kgsl_mmu *mmu)
 static inline int kgsl_mmu_use_cpu_map(struct kgsl_mmu *mmu)
 {
 	return mmu->use_cpu_map;
-}
-
-/*
- * kgsl_mmu_base_addr() - Get gpu virtual address base.
- * @mmu: the mmu
- *
- * Returns the start address of the allocatable gpu
- * virtual address space. Other mappings that mirror
- * the CPU address space are possible outside this range.
- */
-static inline unsigned int kgsl_mmu_get_base_addr(struct kgsl_mmu *mmu)
-{
-	return mmu->pt_base;
-}
-
-/*
- * kgsl_mmu_get_ptsize() - Get gpu pagetable size
- * @mmu: the mmu
- *
- * Returns the usable size of the gpu allocatable
- * address space.
- */
-static inline unsigned int kgsl_mmu_get_ptsize(struct kgsl_mmu *mmu)
-{
-	return mmu->pt_size;
 }
 
 static inline int kgsl_mmu_sync_lock(struct kgsl_mmu *mmu,
