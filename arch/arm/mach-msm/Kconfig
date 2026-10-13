@@ -1446,6 +1446,7 @@ config KRAIT_REGULATOR
 endif
 
 config HAS_MACH_MEMUTILS
+	depends on ARCH_MSM
 	default n
 	bool "Motorola MSM memcpy enhancements"
 	help
