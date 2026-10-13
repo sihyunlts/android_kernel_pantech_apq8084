@@ -449,16 +449,6 @@
 	qcom,num-pins = <0x92>;
 };
 
-&{/soc/qcom,vfe@fda10000} {
-	reg = <0xfda10000 0x1000 0xfda40000 0x200>;
-	reg-names = "vfe", "vfe_vbif";
-};
-
-&{/soc/qcom,vfe@fda14000} {
-	reg = <0xfda14000 0x1000 0xfda40000 0x200>;
-	reg-names = "vfe", "vfe_vbif";
-};
-
 &cci {
 	/delete-node/ qcom,actuator@36;
 	/delete-node/ qcom,eeprom@20;
