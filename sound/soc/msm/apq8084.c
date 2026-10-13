@@ -4281,6 +4281,9 @@ static int apq8084_asoc_machine_probe(struct platform_device *pdev)
 	atomic_set(&sec_auxpcm_rsc_ref, 0);
 	spdev = pdev;
 
+	mbhc_cfg.gpio_level_insert = !of_property_read_bool(pdev->dev.of_node,
+					"qcom,headset-jack-type-NO");
+
 	ret = snd_soc_register_card(card);
 	if (ret == -EPROBE_DEFER) {
 		if (codec_reg_done)
