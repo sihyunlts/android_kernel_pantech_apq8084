@@ -631,11 +631,8 @@ int msm_isp_update_stats_stream(struct vfe_device *vfe_dev, void *arg)
 	struct msm_vfe_axi_stream_update_cmd *update_cmd = arg;
 	struct msm_vfe_axi_stream_cfg_update_info *update_info = NULL;
 
-	if (update_cmd->num_streams > MSM_ISP_STATS_MAX) {
-		pr_err("%s: Invalid num_streams %d\n",
-			__func__, update_cmd->num_streams);
+	if (update_cmd->num_streams > MAX_NUM_STREAM)
 		return -EINVAL;
-	}
 
 	/*validate request*/
 	for (i = 0; i < update_cmd->num_streams; i++) {
