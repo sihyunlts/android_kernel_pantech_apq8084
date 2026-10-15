@@ -519,7 +519,7 @@
 		cell-index = <0x00>;
 		reg = <0xa6>;
 		qcom,slave-id = <0xa6 0x00 0x00>;
-		compatible = "qcom,led-flash";
+		compatible = "ti,lm3559";
 		label = "lm3559";
 		qcom,flash-type = <0x01>;
 		qcom,cci-master = <0x00>;
