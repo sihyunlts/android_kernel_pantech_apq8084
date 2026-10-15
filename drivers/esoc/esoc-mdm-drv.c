@@ -27,6 +27,8 @@ enum {
 	 PEER_CRASH,
 };
 
+#define MDM_BOOT_TIMEOUT	60000L
+
 struct mdm_drv {
 	unsigned mode;
 	struct esoc_eng cmd_eng;
@@ -58,7 +60,7 @@ static void mdm_handle_clink_evt(enum esoc_evt evt,
 {
 	struct mdm_drv *mdm_drv = to_mdm_drv(eng);
 	switch (evt) {
-	case ESOC_INVALID_STATE:
+	case ESOC_BOOT_FAIL:
 		mdm_drv->boot_fail = true;
 		complete(&mdm_drv->boot_done);
 		break;
@@ -171,7 +173,11 @@ static int mdm_subsys_powerup(const struct subsys_desc *crashed_subsys)
 			return ret;
 		}
 	}
-	wait_for_completion(&mdm_drv->boot_done);
+	if (!wait_for_completion_timeout(&mdm_drv->boot_done,
+					msecs_to_jiffies(MDM_BOOT_TIMEOUT))) {
+		dev_err(&esoc_clink->dev, "Unable to boot\n");
+		return -ETIMEDOUT;
+	}
 	if (mdm_drv->boot_fail) {
 		dev_err(&esoc_clink->dev, "booting failed\n");
 		return -EIO;
