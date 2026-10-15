@@ -21,6 +21,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of_gpio.h>
+#include <linux/pm_wakeup.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
@@ -37,8 +38,12 @@
 #define EF67_MXT_MESSAGE_T5	5
 #define EF67_MXT_COMMAND_T6	6
 #define EF67_MXT_POWER_T7		7
+#define EF67_MXT_KEYS_T15		15
 #define EF67_MXT_COUNT_T44	44
 #define EF67_MXT_TOUCH_T100	100
+#define EF67_MXT_SEQUENCE_T93	93
+#define EF67_MXT_REPORT_ENABLE	BIT(1)
+#define EF67_MXT_DOUBLE_TAP	BIT(1)
 #define EF67_MXT_RESET		0
 #define EF67_MXT_CALIBRATE	2
 #define EF67_MXT_T100_UNSUPPRESS	2
@@ -77,6 +82,10 @@ struct ef67_mxt {
 	u16 message_address;
 	u16 command_address;
 	u16 power_address;
+	u16 touch_address;
+	u16 keys_address;
+	u16 gesture_address;
+	u8 gesture_report;
 	u16 count_address;
 	u8 message_size;
 	u8 touch_report_min;
@@ -96,6 +105,10 @@ struct ef67_mxt {
 	bool system_suspended;
 	bool display_blank;
 	bool scanning;
+	bool double_tap_to_wake;
+	bool gesture_mode;
+	bool irq_wake_enabled;
+	bool wake_reported;
 	bool asleep;
 	bool stopping;
 	bool cover_forced;
@@ -134,6 +147,11 @@ static int ef67_mxt_read(struct ef67_mxt *touch, u16 address,
 	};
 	int ret = i2c_transfer(touch->client->adapter, messages, 2);
 
+	/* Allow one wake delay when the DT2W controller NACKs a transfer. */
+	if (ret == -ENOTCONN && ACCESS_ONCE(touch->double_tap_to_wake)) {
+		msleep(25);
+		ret = i2c_transfer(touch->client->adapter, messages, 2);
+	}
 	return ret == 2 ? 0 : (ret < 0 ? ret : -EIO);
 }
 
@@ -149,6 +167,10 @@ static int ef67_mxt_write(struct ef67_mxt *touch, u16 address,
 	packet[1] = address >> 8;
 	memcpy(packet + 2, buffer, size);
 	ret = i2c_master_send(touch->client, packet, size + 2);
+	if (ret == -ENOTCONN && ACCESS_ONCE(touch->double_tap_to_wake)) {
+		msleep(25);
+		ret = i2c_master_send(touch->client, packet, size + 2);
+	}
 	return ret == size + 2 ? 0 : (ret < 0 ? ret : -EIO);
 }
 
@@ -262,11 +284,21 @@ static int ef67_mxt_read_objects(struct ef67_mxt *touch)
 				return -EINVAL;
 			touch->count_address = address;
 			break;
+		case EF67_MXT_KEYS_T15:
+			touch->keys_address = address;
+			break;
+		case EF67_MXT_SEQUENCE_T93:
+			if (instances != 1 || object->report_ids != 1)
+				return -EINVAL;
+			touch->gesture_address = address;
+			touch->gesture_report = report_id;
+			break;
 		case EF67_MXT_TOUCH_T100:
 			/* Report capacity includes two status IDs and can exceed NUMTCH. */
 			if (instances != 1 || object->report_ids < EF67_MXT_CONTACTS + 2)
 				return -EINVAL;
 			touch->touch_report_min = report_id;
+			touch->touch_address = address;
 			touch->touch_report_max = report_id + object->report_ids - 1;
 			break;
 		}
@@ -274,6 +306,7 @@ static int ef67_mxt_read_objects(struct ef67_mxt *touch)
 	}
 	if (!touch->message_address || !touch->command_address ||
 	    !touch->power_address || !touch->touch_report_min ||
+	    !touch->gesture_address || !touch->keys_address ||
 	    !touch->count_address || touch->message_size < 7 ||
 	    touch->message_size > EF67_MXT_MAX_MESSAGE)
 		return -EINVAL;
@@ -485,11 +518,25 @@ static int ef67_mxt_drain(struct ef67_mxt *touch, bool report)
 				ACCESS_ONCE(touch->controller_fault) = true;
 				return -EIO;
 			}
+			if (report && ACCESS_ONCE(touch->gesture_mode)) {
+				if (message[0] == touch->gesture_report &&
+				    (message[1] & EF67_MXT_DOUBLE_TAP) &&
+				    !ACCESS_ONCE(touch->cover_sensor) &&
+				    !touch->wake_reported) {
+					touch->wake_reported = true;
+					pm_wakeup_event(&touch->client->dev, 1000);
+					input_report_key(touch->input, KEY_WAKEUP, 1);
+					input_sync(touch->input);
+					input_report_key(touch->input, KEY_WAKEUP, 0);
+					input_sync(touch->input);
+				}
+				continue;
+			}
 			if (report && message[0] >= touch->touch_report_min + 2 &&
 			    message[0] <= touch->touch_report_max)
 				ef67_mxt_report_touch(touch, message);
 		}
-		if (report)
+		if (report && !ACCESS_ONCE(touch->gesture_mode))
 			ef67_mxt_sync(touch);
 	}
 	return -EOVERFLOW;
@@ -539,27 +586,68 @@ static void ef67_mxt_disable_irq(struct ef67_mxt *touch)
 	}
 }
 
+static int ef67_mxt_set_reporting(struct ef67_mxt *touch, u16 address,
+				  bool enabled)
+{
+	u8 control;
+	int ret = ef67_mxt_read(touch, address, 1, &control);
+
+	if (ret)
+		return ret;
+	if (enabled)
+		control |= EF67_MXT_REPORT_ENABLE;
+	else
+		control &= ~EF67_MXT_REPORT_ENABLE;
+	return ef67_mxt_write(touch, address, 1, &control);
+}
+
+static int ef67_mxt_disable_irq_wake(struct ef67_mxt *touch)
+{
+	int ret = 0;
+
+	if (touch->irq_wake_enabled) {
+		ret = disable_irq_wake(touch->client->irq);
+		if (!ret)
+			touch->irq_wake_enabled = false;
+	}
+	return ret;
+}
+
 static int ef67_mxt_update_scanning(struct ef67_mxt *touch)
 {
 	bool scan = !touch->system_suspended && !touch->display_blank;
+	bool gesture = !scan && touch->display_blank &&
+		touch->double_tap_to_wake && !ACCESS_ONCE(touch->cover_sensor) &&
+		device_may_wakeup(&touch->client->dev);
+	bool was_gesture = touch->gesture_mode;
 	u8 sleep[] = { 0, 0 };
 	u8 run[] = { 255, 255 };
+	/* T93 runs in the controller; normal contact reports stay disabled. */
+	u8 gesture_scan[] = { 64, 32 };
 	int ret;
 
 	/* Only a completed T7 sleep write proves the controller is asleep. */
-	if (touch->stopping || (!scan && touch->asleep) ||
+	if (touch->stopping || (!scan && !gesture && touch->asleep) ||
+	    (gesture && touch->gesture_mode &&
+	     !ACCESS_ONCE(touch->controller_fault)) ||
 	    (scan && touch->scanning && !ACCESS_ONCE(touch->controller_fault)))
 		return 0;
 	ef67_mxt_disable_irq(touch);
 	ef67_mxt_release_all(touch);
 	touch->scanning = false;
-	if (!scan) {
+	ACCESS_ONCE(touch->gesture_mode) = false;
+	if (was_gesture)
+		touch->configured = false;
+	ret = ef67_mxt_disable_irq_wake(touch);
+	if (ret)
+		return ret;
+	if (!scan && !gesture) {
 		ret = ef67_mxt_write(touch, touch->power_address, 2, sleep);
 		if (!ret)
 			touch->asleep = true;
 		return ret;
 	}
-	if (touch->asleep || !touch->configured ||
+	if (was_gesture || touch->asleep || !touch->configured ||
 	    ACCESS_ONCE(touch->controller_fault)) {
 		ret = ef67_mxt_wake(touch);
 	} else {
@@ -569,13 +657,80 @@ static int ef67_mxt_update_scanning(struct ef67_mxt *touch)
 	}
 	if (ret)
 		return ret;
-	ret = ef67_mxt_drain(touch, false);
-	if (ret)
-		return ret;
-	touch->scanning = true;
+	if (gesture) {
+		ret = ef67_mxt_set_reporting(touch, touch->touch_address, false);
+		if (!ret)
+			ret = ef67_mxt_set_reporting(touch, touch->keys_address, false);
+		if (!ret)
+			ret = ef67_mxt_set_reporting(touch, touch->gesture_address, true);
+		if (!ret)
+			ret = ef67_mxt_write(touch, touch->power_address,
+					     sizeof(gesture_scan), gesture_scan);
+		if (!ret)
+			ret = ef67_mxt_drain(touch, false);
+		if (!ret)
+			ret = enable_irq_wake(touch->client->irq);
+		if (ret) {
+			/* Partial control writes must be replaced on the next wake. */
+			ACCESS_ONCE(touch->controller_fault) = true;
+			return ret;
+		}
+		touch->irq_wake_enabled = true;
+		touch->wake_reported = false;
+		ACCESS_ONCE(touch->gesture_mode) = true;
+	} else {
+		ret = ef67_mxt_drain(touch, false);
+		if (ret)
+			return ret;
+		touch->scanning = true;
+	}
 	touch->irq_enabled = true;
 	enable_irq(touch->client->irq);
 	return 0;
+}
+
+static ssize_t double_tap_to_wake_show(struct device *dev,
+		struct device_attribute *attribute, char *buffer)
+{
+	struct ef67_mxt *touch = i2c_get_clientdata(to_i2c_client(dev));
+	ssize_t ret;
+
+	mutex_lock(&touch->lock);
+	ret = scnprintf(buffer, PAGE_SIZE, "%u\n", touch->double_tap_to_wake);
+	mutex_unlock(&touch->lock);
+	return ret;
+}
+
+static ssize_t double_tap_to_wake_store(struct device *dev,
+		struct device_attribute *attribute, const char *buffer, size_t count)
+{
+	struct ef67_mxt *touch = i2c_get_clientdata(to_i2c_client(dev));
+	bool enabled, previous;
+	int ret, restore_ret;
+
+	if (sysfs_streq(buffer, "1"))
+		enabled = true;
+	else if (sysfs_streq(buffer, "0"))
+		enabled = false;
+	else
+		return -EINVAL;
+	mutex_lock(&touch->lock);
+	if (touch->stopping || touch->system_suspended) {
+		ret = touch->stopping ? -ENODEV : -EBUSY;
+		goto out;
+	}
+	previous = touch->double_tap_to_wake;
+	touch->double_tap_to_wake = enabled;
+	ret = ef67_mxt_update_scanning(touch);
+	if (ret) {
+		touch->double_tap_to_wake = previous;
+		restore_ret = ef67_mxt_update_scanning(touch);
+		if (restore_ret)
+			dev_err(dev, "Gesture setting rollback failed: %d\n", restore_ret);
+	}
+out:
+	mutex_unlock(&touch->lock);
+	return ret ? ret : count;
 }
 
 static ssize_t touch_mode_show(struct device *dev,
@@ -644,6 +799,12 @@ static void ef67_mxt_cover_work(struct work_struct *work)
 
 	mutex_lock(&touch->lock);
 	ACCESS_ONCE(touch->cover_window) = ACCESS_ONCE(touch->cover_sensor);
+	if (!touch->stopping && touch->display_blank && !touch->system_suspended) {
+		int ret = ef67_mxt_update_scanning(touch);
+
+		if (ret)
+			dev_err(&touch->client->dev, "Cover gesture transition failed: %d\n", ret);
+	}
 	if (!touch->stopping && !touch->asleep) {
 		/* Stock releases contacts and restores the requested mode after 500 ms. */
 		irq_enabled = touch->irq_enabled;
@@ -852,9 +1013,12 @@ static void ef67_mxt_unregister_control(struct ef67_mxt *touch)
 
 static DEVICE_ATTR(touch_mode, S_IRUGO | S_IWUSR,
 		   touch_mode_show, touch_mode_store);
+static DEVICE_ATTR(double_tap_to_wake, S_IRUGO | S_IWUSR,
+		   double_tap_to_wake_show, double_tap_to_wake_store);
 
 static struct attribute *ef67_mxt_attributes[] = {
 	&dev_attr_touch_mode.attr,
+	&dev_attr_double_tap_to_wake.attr,
 	NULL,
 };
 
@@ -876,7 +1040,8 @@ static int ef67_mxt_fb_event(struct notifier_block *notifier,
 	blank = *(int *)fb_event->data;
 	mutex_lock(&touch->lock);
 	touch->display_blank = blank != FB_BLANK_UNBLANK;
-	ret = ef67_mxt_update_scanning(touch);
+	/* The PM resume callback runs after the I2C adapter has resumed. */
+	ret = touch->system_suspended ? 0 : ef67_mxt_update_scanning(touch);
 	mutex_unlock(&touch->lock);
 	if (ret)
 		dev_err(&touch->client->dev, "Touch display transition failed: %d\n", ret);
@@ -934,6 +1099,7 @@ static int ef67_mxt_register_input(struct ef67_mxt *touch)
 	/* The 3.10 axis helpers do not enable the absolute event type. */
 	__set_bit(EV_ABS, input->evbit);
 	input_set_capability(input, EV_KEY, BTN_TOUCH);
+	input_set_capability(input, EV_KEY, KEY_WAKEUP);
 	for (i = 0; i < ARRAY_SIZE(ef67_mxt_keys); i++)
 		input_set_capability(input, EV_KEY, ef67_mxt_keys[i]);
 	input_set_abs_params(input, ABS_X, 0, EF67_MXT_SCREEN_X, 0, 0);
@@ -996,6 +1162,9 @@ static int ef67_mxt_probe(struct i2c_client *client,
 		goto free_input;
 	touch->irq_enabled = true;
 	touch->scanning = true;
+	ret = device_init_wakeup(&client->dev, true);
+	if (ret)
+		goto free_irq;
 #ifdef CONFIG_FB
 	touch->fb_notifier.notifier_call = ef67_mxt_fb_event;
 	ret = fb_register_client(&touch->fb_notifier);
@@ -1029,9 +1198,10 @@ static int ef67_mxt_probe(struct i2c_client *client,
 unregister_fb:
 #ifdef CONFIG_FB
 	fb_unregister_client(&touch->fb_notifier);
-free_irq:
 #endif
+free_irq:
 	ef67_mxt_disable_irq(touch);
+	device_init_wakeup(&client->dev, false);
 	free_irq(client->irq, touch);
 free_input:
 	input_unregister_device(touch->input);
@@ -1055,10 +1225,12 @@ static int ef67_mxt_remove(struct i2c_client *client)
 	mutex_lock(&touch->lock);
 	touch->stopping = true;
 	ef67_mxt_disable_irq(touch);
+	ef67_mxt_disable_irq_wake(touch);
 	ef67_mxt_release_all(touch);
 	ef67_mxt_power_off(touch);
 	mutex_unlock(&touch->lock);
 	free_irq(client->irq, touch);
+	device_init_wakeup(&client->dev, false);
 	input_unregister_device(touch->input);
 	return 0;
 }
@@ -1070,6 +1242,7 @@ static void ef67_mxt_shutdown(struct i2c_client *client)
 	mutex_lock(&touch->lock);
 	touch->stopping = true;
 	ef67_mxt_disable_irq(touch);
+	ef67_mxt_disable_irq_wake(touch);
 	ef67_mxt_release_all(touch);
 	ef67_mxt_power_off(touch);
 	mutex_unlock(&touch->lock);

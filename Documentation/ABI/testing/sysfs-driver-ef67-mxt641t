@@ -46,3 +46,27 @@ Description:
 		makes existing files return ENODEV. Debugging commands are not
 		implemented. The device is created with mode
 		0600; stock init applies its system:radio 0660 permissions.
+
+What:           /sys/bus/i2c/devices/<bus>-004a/double_tap_to_wake
+Date:           October 2026
+Description:
+                Selects controller-side T93 double-tap wake detection.
+                Accepts 0 (disabled, default) or 1 (enabled); reads return
+                the selected value followed by a newline. Invalid input
+                returns EINVAL; changes during system suspend return EBUSY.
+
+                When enabled and the display is blank, T100 and T15 normal
+                input reports are disabled, T93 reporting remains enabled,
+                and T7 idle/active scan intervals are 64/32 ms. The IRQ
+                is armed as a wake source. A T93 double-tap (status bit 1)
+                generates one KEY_WAKEUP press/release per blank period.
+                There is no host-side tap timer or continuous touch input
+                processing. The selected stock T93 thresholds are retained.
+
+                A closed smart cover disables gesture scanning. Returning
+                to the display restores the full selected stock RAM touch
+                configuration. Disabling uses the existing deep sleep path.
+                A failed change restores the previous setting; hardware
+                errors are propagated. No firmware or NVM is written.
+                The controller and IRQ remain active for gesture detection,
+                so power consumption can exceed that of disabled deep sleep.
