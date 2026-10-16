@@ -1,25 +1,10 @@
-comment "Qualcomm Atheros Prima WLAN module"
-
-config PRIMA_WLAN
-
-	tristate "Qualcomm Atheros Prima WLAN module"
-	default n
+config QCA_CLD_WLAN
+	tristate "Qualcomm Atheros CLD WLAN driver"
+	depends on CNSS && CFG80211
 	help
-	Add support for the Qualcomm Atheros Prima WLAN module
+	  Support for the PCIe QCA6174 wireless chipset.
 
-config PRONTO_WLAN
-
-	tristate "Qualcomm Atheros Pronto WLAN module"
-	default n
-	help
-	Add support for the Qualcomm Atheros Pronto WLAN module
-
-
-#	depends on WLAN
-#	depends on CFG80211
-#        depends on WCNSS_CORE
-
-if PRIMA_WLAN != n || PRONTO_WLAN != n
+if QCA_CLD_WLAN
 
 config PRIMA_WLAN_BTAMP
 	bool "Enable the Prima WLAN BT-AMP feature"
@@ -45,8 +30,14 @@ config QCOM_VOWIFI_11R
 	bool "Enable Fast Transition (11r) feature"
 	default n
 
-config CONFIG_ENABLE_LINUX_REG
+config ENABLE_LINUX_REG
 	bool "Enable linux regulatory feature"
 	default n
 
-endif # PRIMA_WLAN || PRONTO_WLAN
+config QCOM_TDLS
+	bool "Enable TDLS"
+
+config QCOM_LTE_COEX
+	bool "Enable LTE coexistence"
+
+endif # QCA_CLD_WLAN

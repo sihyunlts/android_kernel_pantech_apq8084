@@ -10,7 +10,9 @@ ifeq ($(KERNEL_BUILD),1)
 	# These are provided in external module based builds
 	# Need to explicitly define for Kernel-based builds
 	MODNAME := wlan
-	WLAN_ROOT := drivers/staging/qcacld-2.0
+	WLAN_ROOT := $(srctree)/$(src)
+	CONFIG_QCA_WIFI_ISOC := 0
+	CONFIG_QCA_WIFI_2_0 := 1
 	WLAN_OPEN_SOURCE := 1
 endif
 

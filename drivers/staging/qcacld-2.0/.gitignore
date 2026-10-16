@@ -7,3 +7,6 @@ Module.symvers
 modules.order
 .tmp_versions/
 out/
+
+# Keep the upstream sample NV image despite the kernel-wide *.bin rule.
+!firmware_bin/WCNSS_qcom_wlan_nv.bin
