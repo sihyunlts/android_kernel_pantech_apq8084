@@ -1372,17 +1372,17 @@ static int ef67_update_usb_current(struct smb135x_chg *chip, bool charging)
 	if (mhl_psy) {
 		rc = mhl_psy->get_property(mhl_psy,
 				POWER_SUPPLY_PROP_PRESENT, &current_prop);
-		if (rc)
-			return rc;
-		if (current_prop.intval) {
+		if (!rc && current_prop.intval) {
 			rc = mhl_psy->get_property(mhl_psy,
 					POWER_SUPPLY_PROP_CURRENT_MAX, &current_prop);
-			if (rc)
-				return rc;
-			if (current_prop.intval < 0)
-				return -EINVAL;
-			chip->usb_psy_ma = current_prop.intval / 1000;
+			if (!rc && current_prop.intval < 0)
+				rc = -EINVAL;
+			if (!rc)
+				chip->usb_psy_ma = current_prop.intval / 1000;
 		}
+		put_device(mhl_psy->dev);
+		if (rc)
+			return rc;
 	}
 
 	if (charging && chip->boot_power_on_mode &&
