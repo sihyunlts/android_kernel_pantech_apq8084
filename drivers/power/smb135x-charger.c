@@ -430,6 +430,7 @@ struct smb135x_chg {
 	bool				thermal_running;
 	bool				thermal_allowed;
 	bool				charging_requested;
+	bool				battery_charging_requested;
 	int				temp_state;
 	int				applied_temp_state;
 	int				applied_temp_decic;
@@ -657,6 +658,7 @@ static enum power_supply_type get_usb_supply_type(u8 stat_5)
 static enum power_supply_property smb135x_battery_properties[] = {
 #ifdef CONFIG_MACH_APQ8084_EF67
 	POWER_SUPPLY_PROP_TEMP,
+	POWER_SUPPLY_PROP_CHARGE_ENABLED,
 #endif
 	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_PRESENT,
@@ -1311,7 +1313,8 @@ static int __smb135x_charging(struct smb135x_chg *chip, int enable)
 	bool charge_enabled = enable;
 
 #ifdef CONFIG_MACH_APQ8084_EF67
-	charge_enabled = enable && chip->thermal_allowed;
+	charge_enabled = enable && chip->thermal_allowed &&
+			 chip->battery_charging_requested;
 #endif
 	pr_debug("charging enable = %d\n", charge_enabled);
 
@@ -1664,6 +1667,32 @@ static int smb135x_charging(struct smb135x_chg *chip, int enable)
 	return rc;
 }
 
+#ifdef CONFIG_MACH_APQ8084_EF67
+/* Stop battery charging without suspending USB/DC input power. */
+static int ef67_set_battery_charging(struct smb135x_chg *chip, int enable)
+{
+	int rc;
+
+	if (enable != 0 && enable != 1)
+		return -EINVAL;
+
+	mutex_lock(&chip->current_change_lock);
+	chip->battery_charging_requested = enable;
+	if (!chip->resume_completed)
+		rc = -EBUSY;
+	else if (enable)
+		rc = ef67_update_thermal(chip);
+	else
+		rc = __smb135x_charging(chip, chip->charging_requested);
+	mutex_unlock(&chip->current_change_lock);
+
+	if (chip->usb_psy)
+		power_supply_changed(chip->usb_psy);
+	power_supply_changed(&chip->batt_psy);
+	return rc;
+}
+#endif
+
 static int smb135x_system_temp_level_set(struct smb135x_chg *chip,
 								int lvl_sel)
 {
@@ -1763,6 +1792,10 @@ static int smb135x_battery_set_property(struct power_supply *psy,
 	switch (prop) {
 	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
 		return smb135x_charging(chip, val->intval);
+#ifdef CONFIG_MACH_APQ8084_EF67
+	case POWER_SUPPLY_PROP_CHARGE_ENABLED:
+		return ef67_set_battery_charging(chip, val->intval);
+#endif
 	case POWER_SUPPLY_PROP_CAPACITY:
 		chip->fake_battery_soc = val->intval;
 		power_supply_changed(&chip->batt_psy);
@@ -1785,6 +1818,9 @@ static int smb135x_battery_is_writeable(struct power_supply *psy,
 	switch (prop) {
 	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
 	case POWER_SUPPLY_PROP_CAPACITY:
+#ifdef CONFIG_MACH_APQ8084_EF67
+	case POWER_SUPPLY_PROP_CHARGE_ENABLED:
+#endif
 	case POWER_SUPPLY_PROP_SYSTEM_TEMP_LEVEL:
 		rc = 1;
 		break;
@@ -1812,6 +1848,11 @@ static int smb135x_battery_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
 		val->intval = chip->chg_enabled;
 		break;
+#ifdef CONFIG_MACH_APQ8084_EF67
+	case POWER_SUPPLY_PROP_CHARGE_ENABLED:
+		val->intval = chip->battery_charging_requested;
+		break;
+#endif
 	case POWER_SUPPLY_PROP_CHARGE_TYPE:
 		val->intval = smb135x_get_prop_charge_type(chip);
 		break;
@@ -1873,6 +1914,7 @@ static void smb135x_external_power_changed(struct power_supply *psy)
 				struct smb135x_chg, batt_psy);
 	union power_supply_propval prop = {0,};
 	int rc;
+	bool usb_online;
 #ifndef CONFIG_MACH_APQ8084_EF67
 	int current_limit = 0;
 #endif
@@ -1884,6 +1926,8 @@ static void smb135x_external_power_changed(struct power_supply *psy)
 		if (rc)
 			dev_err(chip->dev, "Couldn't update USB charging rc=%d\n", rc);
 	}
+	usb_online = chip->usb_present && !chip->usb_suspended &&
+			chip->usb_psy_ma != 0;
 	mutex_unlock(&chip->current_change_lock);
 #else
 	rc = chip->usb_psy->get_property(chip->usb_psy,
@@ -1906,6 +1950,8 @@ static void smb135x_external_power_changed(struct power_supply *psy)
 			dev_err(chip->dev, "Couldn't set usb current rc = %d\n",
 					rc);
 	}
+	usb_online = chip->usb_present && chip->chg_enabled &&
+			chip->usb_psy_ma != 0;
 #endif
 
 	rc = chip->usb_psy->get_property(chip->usb_psy,
@@ -1918,7 +1964,7 @@ static void smb135x_external_power_changed(struct power_supply *psy)
 
 	/* update online property */
 	rc = 0;
-	if (chip->usb_present && chip->chg_enabled && chip->usb_psy_ma != 0) {
+	if (usb_online) {
 		if (prop.intval == 0)
 			rc = power_supply_set_online(chip->usb_psy, true);
 	} else {
@@ -3653,6 +3699,7 @@ static int smb_parse_dt(struct smb135x_chg *chip)
 						"qcom,charging-disabled"));
 #ifdef CONFIG_MACH_APQ8084_EF67
 	chip->charging_requested = chip->chg_enabled;
+	chip->battery_charging_requested = true;
 	chip->chg_enabled = false;
 #endif
 
