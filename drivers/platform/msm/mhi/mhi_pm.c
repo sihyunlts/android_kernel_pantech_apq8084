@@ -10,7 +10,7 @@
  * GNU General Public License for more details.
  */
 
-#include "msm_mhi.h"
+#include <linux/msm_mhi.h>
 #include "mhi_sys.h"
 #include "mhi.h"
 #include "mhi_hwio.h"

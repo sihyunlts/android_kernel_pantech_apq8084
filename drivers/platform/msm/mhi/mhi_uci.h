@@ -12,7 +12,7 @@
 #ifndef _H_MHI_UCI_INTERFACE
 #define _H_MHI_UCI_INTERFACE
 
-#include "msm_mhi.h"
+#include <linux/msm_mhi.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/completion.h>
