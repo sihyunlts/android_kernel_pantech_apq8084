@@ -246,6 +246,9 @@
 		qcom,mdss-dsi-stream = <0x00>;
 		qcom,mdss-dsi-panel-width = <0x2d0>;
 		qcom,mdss-dsi-panel-height = <0xa00>;
+		/* Full 6-inch display area, rounded to whole millimetres. */
+		qcom,mdss-pan-physical-width-dimension = <75>;
+		qcom,mdss-pan-physical-height-dimension = <133>;
 		qcom,mdss-dsi-h-front-porch = <0x64>;
 		qcom,mdss-dsi-h-back-porch = <0x20>;
 		qcom,mdss-dsi-h-pulse-width = <0x10>;
@@ -321,6 +324,9 @@
 		qcom,mdss-dsi-stream = <0x00>;
 		qcom,mdss-dsi-panel-width = <0x2d0>;
 		qcom,mdss-dsi-panel-height = <0xa00>;
+		/* Full 6-inch display area, rounded to whole millimetres. */
+		qcom,mdss-pan-physical-width-dimension = <75>;
+		qcom,mdss-pan-physical-height-dimension = <133>;
 		qcom,mdss-dsi-h-front-porch = <0x64>;
 		qcom,mdss-dsi-h-back-porch = <0x20>;
 		qcom,mdss-dsi-h-pulse-width = <0x10>;
