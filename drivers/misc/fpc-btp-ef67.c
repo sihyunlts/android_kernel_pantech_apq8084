@@ -25,6 +25,7 @@
 #define FPC_FRAME_SIZE (160 * 160)
 #define FPC_FRAME_COUNT 5
 #define FPC_SPI_HZ 8000000
+#define FPC_INPUT_SYSTEM_NAVIGATION 4
 #define FPC_CAPTURE _IO(0xfc, 0)
 #define FPC_ABORT _IO(0xfc, 1)
 #define FPC_NAVIGATION _IOW(0xfc, 4, unsigned int)
@@ -42,7 +43,7 @@ struct ef67_fpc {
 	struct mutex data_lock;
 	struct workqueue_struct *sensor_queue;
 	struct work_struct sensor_work;
-	struct input_dev *inputs[3];
+	struct input_dev *inputs[FPC_INPUT_SYSTEM_NAVIGATION];
 	struct ef67_fpc_nav_settings nav_settings;
 	struct ef67_fpc_nav_settings active_nav_settings;
 	struct ef67_fpc_nav_state nav_state;
@@ -77,6 +78,10 @@ struct ef67_fpc {
 	bool navigation_enabled;
 	bool navigation_active;
 	bool navigation_on_close;
+	bool system_navigation_enabled;
+	bool active_system_navigation;
+	int system_nav_x;
+	int system_nav_y;
 };
 
 static void ef67_fpc_free(struct kref *ref)
@@ -294,6 +299,29 @@ static void ef67_fpc_report_navigation(struct ef67_fpc *fpc, int dx, int dy,
 				       unsigned int contact)
 {
 	unsigned int mode = fpc->active_nav_settings.btp_input_mode;
+
+	if (fpc->active_system_navigation) {
+		struct input_dev *input = fpc->inputs[FPC_INPUT_SYSTEM_NAVIGATION - 1];
+
+		if (contact == FPC_CONTACT_DOWN) {
+			fpc->system_nav_x = 0;
+			fpc->system_nav_y = 0;
+		} else if (contact == FPC_CONTACT_MOVE) {
+			/* Same axis orientation as the stock touch navigation. */
+			fpc->system_nav_x = clamp(fpc->system_nav_x + dy, -160, 160);
+			fpc->system_nav_y = clamp(fpc->system_nav_y + dx, -160, 160);
+		} else if (contact == FPC_CONTACT_UP &&
+			   abs(fpc->system_nav_y) >= 10 &&
+			   abs(fpc->system_nav_y) > abs(fpc->system_nav_x)) {
+			unsigned int key = fpc->system_nav_y > 0 ? KEY_DOWN : KEY_UP;
+
+			input_report_key(input, key, 1);
+			input_sync(input);
+			input_report_key(input, key, 0);
+			input_sync(input);
+		}
+		return;
+	}
 
 	ef67_fpc_nav_event(&fpc->nav_state, &fpc->active_nav_settings,
 			   fpc->inputs[mode - 1], dx, dy, contact,
@@ -524,6 +552,7 @@ static int ef67_fpc_start_navigation(struct ef67_fpc *fpc)
 		return ret;
 	memcpy(fpc->capture_adc, fpc->adc, sizeof(fpc->capture_adc));
 	fpc->active_nav_settings = fpc->nav_settings;
+	fpc->active_system_navigation = fpc->system_navigation_enabled;
 	memset(&fpc->nav_state, 0, sizeof(fpc->nav_state));
 	mutex_lock(&fpc->data_lock);
 	fpc->running = true;
@@ -646,8 +675,9 @@ static int ef67_fpc_release(struct inode *inode, struct file *file)
 
 	mutex_lock(&fpc->control);
 	ef67_fpc_cancel(fpc);
-	if (fpc->navigation_on_close && !fpc->removed) {
-		fpc->navigation_enabled = true;
+	if ((fpc->navigation_on_close || fpc->system_navigation_enabled) &&
+	    !fpc->removed) {
+		fpc->navigation_enabled = fpc->navigation_on_close;
 		/* Defer a close restart until resume if the sensor is powered off. */
 		if (!fpc->suspended) {
 			int ret = ef67_fpc_start_navigation(fpc);
@@ -1063,13 +1093,62 @@ FPC_NAV_ATTR(threshold_ptr_start);
 FPC_NAV_ATTR(duration_ptr_clear);
 FPC_NAV_ATTR(nav_finger_up_threshold);
 FPC_NAV_ATTR(btp_input_mode);
+/* System navigation never takes the sensor away from an open capture client. */
+static ssize_t system_navigation_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct ef67_fpc *fpc = dev_get_drvdata(dev);
+	bool enabled;
+
+	mutex_lock(&fpc->control);
+	enabled = fpc->system_navigation_enabled;
+	mutex_unlock(&fpc->control);
+	return scnprintf(buf, PAGE_SIZE, "%u\n", enabled);
+}
+
+static ssize_t system_navigation_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct ef67_fpc *fpc = dev_get_drvdata(dev);
+	bool enabled, previous;
+	int ret = strtobool(buf, &enabled);
+
+	if (ret)
+		return ret;
+	mutex_lock(&fpc->control);
+	if (fpc->removed) {
+		ret = -ENODEV;
+		goto out;
+	}
+	previous = fpc->system_navigation_enabled;
+	if (enabled == previous)
+		goto out;
+	fpc->system_navigation_enabled = enabled;
+	if (fpc->suspended)
+		goto out;
+	if (!fpc->opened && (enabled || fpc->navigation_enabled)) {
+		ret = ef67_fpc_start_navigation(fpc);
+	} else if (fpc->navigation_active && fpc->active_system_navigation) {
+		ef67_fpc_cancel(fpc);
+		ret = ef67_fpc_reset(fpc);
+	}
+	if (ret)
+		fpc->system_navigation_enabled = previous;
+out:
+	mutex_unlock(&fpc->control);
+	return ret ? ret : count;
+}
+static DEVICE_ATTR(system_navigation, 0660, system_navigation_show,
+		   system_navigation_store);
+
 static struct attribute *ef67_fpc_nav_attrs[] = {
 	FPC_ATTRIBUTE(p_sensitivity_key), FPC_ATTRIBUTE(p_sensitivity_ptr),
 	FPC_ATTRIBUTE(p_multiplier_x), FPC_ATTRIBUTE(p_multiplier_y),
 	FPC_ATTRIBUTE(multiplier_key_accel), FPC_ATTRIBUTE(multiplier_ptr_accel),
 	FPC_ATTRIBUTE(threshold_key_accel), FPC_ATTRIBUTE(threshold_ptr_accel),
 	FPC_ATTRIBUTE(threshold_ptr_start), FPC_ATTRIBUTE(duration_ptr_clear),
-	FPC_ATTRIBUTE(nav_finger_up_threshold), FPC_ATTRIBUTE(btp_input_mode), NULL,
+	FPC_ATTRIBUTE(nav_finger_up_threshold), FPC_ATTRIBUTE(btp_input_mode),
+	&dev_attr_system_navigation.attr, NULL,
 };
 static const struct attribute_group ef67_fpc_nav_group = {
 	.name = "nav_settings",
@@ -1091,14 +1170,15 @@ static void ef67_fpc_unregister_inputs(struct ef67_fpc *fpc)
 static int ef67_fpc_register_inputs(struct ef67_fpc *fpc)
 {
 	static const char * const names[] = {
-		"fpcTouchpad", "fpcTrackpad", "fpcMouse",
+		"fpcTouchpad", "fpcTrackpad", "fpcMouse", "fpcSystemNavigation",
 	};
 	unsigned int i;
 	int ret;
 
 	for (i = 0; i < ARRAY_SIZE(fpc->inputs); i++) {
 		unsigned int mode = i == 0 ? FPC_INPUT_TRACKPAD :
-				    i == 1 ? FPC_INPUT_MOUSE : FPC_INPUT_TOUCH;
+				    i == 1 ? FPC_INPUT_MOUSE :
+				    i == 2 ? FPC_INPUT_TOUCH : FPC_INPUT_SYSTEM_NAVIGATION;
 		struct input_dev *input = input_allocate_device();
 
 		if (!input) {
@@ -1107,7 +1187,10 @@ static int ef67_fpc_register_inputs(struct ef67_fpc *fpc)
 		}
 		input->name = names[mode - 1];
 		input->dev.parent = &fpc->spi->dev;
-		if (mode == FPC_INPUT_TOUCH) {
+		if (mode == FPC_INPUT_SYSTEM_NAVIGATION) {
+			input_set_capability(input, EV_KEY, KEY_UP);
+			input_set_capability(input, EV_KEY, KEY_DOWN);
+		} else if (mode == FPC_INPUT_TOUCH) {
 			input_set_capability(input, EV_KEY, BTN_TOUCH);
 			__set_bit(EV_ABS, input->evbit);
 			__set_bit(INPUT_PROP_DIRECT, input->propbit);
@@ -1297,7 +1380,8 @@ static int ef67_fpc_suspend(struct device *dev)
 			restore = ef67_fpc_reset(fpc);
 			if (!restore)
 				restore = ef67_fpc_verify_id(fpc);
-			if (!restore && fpc->navigation_enabled)
+			if (!restore && (fpc->navigation_enabled ||
+			    (!fpc->opened && fpc->system_navigation_enabled)))
 				restore = ef67_fpc_start_navigation(fpc);
 			if (restore)
 				disable_irq(fpc->irq);
@@ -1327,7 +1411,8 @@ static int ef67_fpc_resume(struct device *dev)
 		ret = ef67_fpc_reset(fpc);
 		if (!ret)
 			ret = ef67_fpc_verify_id(fpc);
-		if (!ret && fpc->navigation_enabled)
+		if (!ret && (fpc->navigation_enabled ||
+		    (!fpc->opened && fpc->system_navigation_enabled)))
 			ret = ef67_fpc_start_navigation(fpc);
 		if (ret)
 			disable_irq(fpc->irq);
